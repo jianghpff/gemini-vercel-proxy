@@ -1,0 +1,17 @@
+{
+  "functions": {
+    "api/*.js": {
+      "includeFiles": "{node_modules/@google/genai/**,node_modules/canvas/**,node_modules/express/**,node_modules/fontconfig/**,node_modules/formdata-node/**,node_modules/marked/**,node_modules/node-fetch/**,node_modules/puppeteer/**,asset/**,fonts.conf}",
+      "maxDuration": 300
+    }
+  },
+  "build": {
+    "env": {
+      "CANVAS_PREBUILT": "1"
+    }
+  },
+  "env": {
+    "FONTCONFIG_PATH": "/tmp",
+    "FONTCONFIG_FILE": "/tmp/fonts.conf"
+  }
+}
