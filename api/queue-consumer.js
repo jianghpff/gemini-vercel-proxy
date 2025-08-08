@@ -1,98 +1,149 @@
 // in multi-gemini-proxy/api/queue-consumer.js
 
-const { GoogleGenerativeAI } = require('@google/generative-ai');
+const { GoogleGenerativeAI, HarmCategory, HarmBlockThreshold } = require('@google/generative-ai');
 const fetch = require('node-fetch');
 // 导入内部API函数
 const feishuOperations = require('./feishu-operations.js');
 
-module.exports = async function handler(req, res) {
-  if (req.method !== 'POST') {
-    return res.status(405).json({ error: 'Method Not Allowed. Please use POST.' });
-  }
+// --- 新增：视频智能筛选函数 ---
+/**
+ * 使用Gemini 1.5 Flash模型，基于视频描述智能选择视频。
+ * @param {GoogleGenerativeAI} ai - GoogleGenerativeAI实例。
+ * @param {Array} allVideos - 包含所有视频数据的数组。
+ * @returns {Promise<Array>} - 返回3个被选中的视频对象的数组。
+ */
+async function selectVideosWithGemini(ai, allVideos) {
+    console.log('Starting video selection with Gemini 1.5 Flash...');
+    const model = ai.getGenerativeModel({ model: 'gemini-1.5-flash' });
 
-  const GEMINI_API_KEY = process.env.GEMINI_API_KEY;
-  if (!GEMINI_API_KEY) {
-    console.error('GEMINI_API_KEY is not configured.');
-    return res.status(500).json({ error: 'GEMINI_API_KEY is not configured.' });
-  }
+    const videoSelectorTool = {
+        name: 'video_selector',
+        description: '根据视频描述列表，选择所有与美妆护肤主题相关的视频。',
+        parameters: {
+            type: 'OBJECT',
+            properties: {
+                videos: {
+                    type: 'ARRAY',
+                    description: '所有被识别为美妆护肤类的视频列表',
+                    items: {
+                        type: 'OBJECT',
+                        properties: {
+                            id: {
+                                type: 'STRING',
+                                description: '视频的唯一ID (aweme_id)',
+                            },
+                            reason: {
+                                type: 'STRING',
+                                description: '将此视频归类为美妆护肤的理由',
+                            },
+                        },
+                        required: ['id', 'reason'],
+                    },
+                },
+            },
+            required: ['videos'],
+        },
+    };
 
-  try {
-    const { messages } = req.body;
+    const videosForSelection = allVideos.map(v => ({
+        id: v.aweme_id,
+        desc: v.desc,
+        play_count: v.statistics.play_count,
+    }));
 
-    if (!messages || !Array.isArray(messages) || messages.length === 0) {
-      console.log('Received queue request with no messages.');
-      return res.status(200).json({ success: true, message: 'No messages to process.' });
-    }
+    const prompt = `
+        请分析以下TikTok视频列表（包含ID、描述和播放量），并严格按照 "video_selector" 工具的格式要求，返回一个JSON对象。
+        你的任务是：
+        1. 找出列表中所有与“美妆护肤”类目相关的视频。
+        2. 如果找不到任何美妆护肤视频，请返回一个空的 "videos" 数组。
 
-    // Process only the first message in the batch to control rate
-    const message = messages[0];
-    console.log(`Processing message ID: ${message.id}`);
+        视频列表如下:
+        ${JSON.stringify(videosForSelection)}
+    `;
 
-    const { feishuRecordId, commercialData, creatorHandle, env, accessToken } = message.body;
-
-    if (!feishuRecordId || !commercialData || !creatorHandle || !env || !accessToken) {
-      console.error('Message body is missing required parameters.', message.body);
-      // Acknowledge the message to prevent retries for malformed data
-      return res.status(200).json({ error: 'Bad Request. Message body missing required parameters.' });
-    }
-    
-    console.log(`Starting analysis for Feishu Record ID: ${feishuRecordId}`);
-
-    // 1. 获取TikTok数据
-    console.log('Step 1: Fetching TikTok data...');
-    const { allVideos, topVideos } = await getTiktokData(creatorHandle);
-    
-    console.log('=== TikTok数据获取结果 ===');
-    console.log(`📊 获取到的视频总数: ${allVideos.length} 条`);
-    console.log(`🎯 用于视频分析的Top视频数: ${topVideos.length} 条`);
-    console.log('==========================');
-    
-    // 如果最终没有获取到任何视频，则更新飞书并中止
-    if (allVideos.length === 0) {
-      console.log(`No public TikTok videos found for ${creatorHandle}. Updating Feishu record and stopping.`);
-      const reviewOpinion = '数据不足';
-      const reportMarkdown = `未能获取到创作者 ${creatorHandle} 的任何公开视频数据，分析流程已中止。`;
-      await performCompleteFeishuOperations(feishuRecordId, reviewOpinion, reportMarkdown, creatorHandle, env, accessToken, commercialData);
-      return res.status(200).json({ success: true, message: 'No videos found, process terminated after updating Feishu.' });
-    }
-
-    const ai = new GoogleGenerativeAI(GEMINI_API_KEY);
-    
-    // 2. 进行AI分析，并处理可能发生的异常
-    console.log('Step 2: Starting AI analysis...');
-    let reportMarkdown, reviewOpinion;
     try {
-      const analysisResult = await performAiAnalysis(ai, commercialData, allVideos, topVideos);
-      reportMarkdown = analysisResult.reportMarkdown;
-      reviewOpinion = analysisResult.reviewOpinion;
-    } catch (aiError) {
-      console.error(`Gemini analysis failed for record ${feishuRecordId}:`, aiError.stack);
-      // 如果AI分析失败，则更新飞书为异常状态并中止
-      reviewOpinion = 'gemini分析异常';
-      reportMarkdown = `在为创作者 ${creatorHandle} 生成分析报告时，Gemini API 调用失败。分析流程已中止。\n\n**错误详情:**\n\`\`\`\n${aiError.message}\n\`\`\``;
-      await performCompleteFeishuOperations(feishuRecordId, reviewOpinion, reportMarkdown, creatorHandle, env, accessToken, commercialData);
-      // 返回成功响应以防止队列重试
-      return res.status(200).json({ success: true, message: 'Gemini analysis failed, process terminated after updating Feishu.' });
+        const result = await model.generateContent({
+            contents: [{ parts: [{ text: prompt }] }],
+            tools: [{ functionDeclarations: [videoSelectorTool] }],
+            tool_config: { functionCallingConfig: { mode: "REQUIRED", allowedFunctionNames: ["video_selector"] } },
+        });
+
+        const call = result.response.functionCalls()[0];
+        if (!call || call.name !== 'video_selector' || !call.args.videos) {
+            console.warn('Gemini did not return valid video selections. Proceeding without beauty category analysis.');
+            const videosForAnalysis = allVideos.sort((a, b) => b.statistics.play_count - a.statistics.play_count).slice(0, 3);
+            return { beautyVideos: [], videosForAnalysis };
+        }
+
+        const beautyVideoIds = new Set(call.args.videos.map(v => v.id));
+        console.log(`Gemini identified ${beautyVideoIds.size} beauty videos.`);
+
+        const beautyVideos = allVideos.filter(v => beautyVideoIds.has(v.aweme_id));
+        
+        // 准备用于深度分析的3个视频
+        let videosForAnalysis = [];
+        const sortedBeautyVideos = [...beautyVideos].sort((a, b) => b.statistics.play_count - a.statistics.play_count);
+        videosForAnalysis = sortedBeautyVideos.slice(0, 3);
+        
+        // 如果美妆视频不足3个，用其他高播放量视频补足
+        if (videosForAnalysis.length < 3) {
+            console.log(`Beauty videos are less than 3. Topping up with most played videos.`);
+            const selectedIdSet = new Set(videosForAnalysis.map(v => v.aweme_id));
+            const remainingVideos = allVideos
+                .filter(v => !selectedIdSet.has(v.aweme_id))
+                .sort((a, b) => b.statistics.play_count - a.statistics.play_count);
+            
+            const needed = 3 - videosForAnalysis.length;
+            videosForAnalysis.push(...remainingVideos.slice(0, needed));
+        }
+        
+        console.log(`Final selected video IDs for deep analysis:`, videosForAnalysis.map(v => v.aweme_id));
+        return { beautyVideos, videosForAnalysis };
+
+    } catch (error) {
+        console.error('Error during Gemini video selection, falling back to top 3 played videos:', error);
+        // 如果API调用失败，则降级为选择播放量最高的3个，且美妆列表为空
+        const videosForAnalysis = allVideos.sort((a, b) => b.statistics.play_count - a.statistics.play_count).slice(0, 3);
+        return { beautyVideos: [], videosForAnalysis };
     }
-
-    // 3. 直接更新飞书表格
-    console.log('Step 3: Updating Feishu table with Gemini analysis content...');
-    await performCompleteFeishuOperations(feishuRecordId, reviewOpinion, reportMarkdown, creatorHandle, env, accessToken, commercialData);
-
-    console.log('All operations completed successfully');
-    return res.status(200).json({ success: true, message: 'All operations completed' });
-
-  } catch (error) {
-    console.error("Error in Vercel Gemini Orchestrator:", error.stack);
-    return res.status(500).json({ error: 'Internal Server Error', details: error.message });
-  }
 }
 
+
+// --- 新增：结构化分析报告生成函数 ---
 /**
- * 执行AI分析 (重构后使用内联数据)
+ * 使用Gemini模型生成结构化的分析报告。
+ * @param {GoogleGenerativeAI} ai - GoogleGenerativeAI实例。
+ * @param {object} commercialData - 商业合作数据。
+ * @param {Array} allVideos - 所有视频的统计数据。
+ * @param {Array} selectedVideos - 被选中的3个视频的完整数据。
+ * @param {Array} videoBuffers - 3个视频的文件Buffer。
+ * @returns {Promise<object>} - 返回包含reportMarkdown和reviewOpinion的对象。
  */
-async function performAiAnalysis(ai, commercialData, allVideos, topVideos) {
-  const prompt = `
+async function generateStructuredAnalysis(ai, commercialData, allVideos, selectedVideos, videoBuffers) {
+    console.log('Starting structured analysis with Gemini 2.5 Flash...');
+    
+    // 定义强制输出的工具（Schema）
+    const analysisGeneratorTool = {
+        name: "analysis_generator",
+        description: "生成创作者能力深度分析报告和审核意见",
+        parameters: {
+            type: "OBJECT",
+            properties: {
+                reportMarkdown: {
+                    type: "STRING",
+                    description: "完整的Markdown格式的创作者能力分析报告，对应任务一的输出。",
+                },
+                reviewOpinion: {
+                    type: "STRING",
+                    description: "简洁的审核意见，对应任务二的输出（例如：'强烈推荐', '值得考虑'等）。",
+                },
+            },
+            required: ["reportMarkdown", "reviewOpinion"],
+        },
+    };
+
+    // 保留用户原有的Prompt
+    const prompt = `
     你是一位顶级的短视频内容分析与商业合作策略专家。你的任务是基于以下信息，深度分析一位TikTok创作者的创作风格、擅长方向、创作能力和商业化潜力：
     1.  **商业合作数据**：来自品牌方的表格，包含粉丝数、历史销售额等。这些数据是创作者在平台上的整体表现，并非是和我们品牌合作的历史数据。其中GMV是创作者在平台上的整体销售额，并非获得的整体佣金。而商业数据中的佣金，是指我们为此产品设置的公开创作佣金，并非太多实际含义，另外预计发布率，是指创作者过去30天在与品牌合作过程中的履约指标，91%代表100个合作中会履约91个。
     2.  **近100条视频的完整统计数据**：包含所有视频的描述、播放、点赞、评论等统计数据。
@@ -103,9 +154,7 @@ async function performAiAnalysis(ai, commercialData, allVideos, topVideos) {
     7.  **我们当前品牌是处于美妆个护类目下，所以若达人存在美妆个护类的相关视频，请你重点分析。**
     8.  **提供的商业数据中的视频平均观看量是指创作者所有的视频的平均观看量(包括电商视频和非电商视频)，并非是和我们品牌合作的历史数据。请你不要忘记**
 
-    请你整合所有信息，完成以下两个任务，并在两个任务的输出之间，使用 \`---SEPARATOR---\` 作为唯一的分隔符。
-
-    **重要提示：** 请特别关注飞书多维表格中的达人的商业数据，包括销售额、预计发布率等关键指标。这些数据是评估创作者商业化能力和合作可行性的重要依据。在分析过程中，请结合这些商业数据与TikTok内容数据进行综合分析。
+    请你整合所有信息，完成以下两个任务，并严格按照 "analysis_generator" 工具的格式要求，将两个任务的结果分别填入对应的参数中。
 
     ---
     ### 飞书多维表格商业数据
@@ -135,7 +184,7 @@ async function performAiAnalysis(ai, commercialData, allVideos, topVideos) {
         cha_list: v.cha_list,
         text_extra: v.text_extra
     })), null, 2)}
-    - **播放量最高的3个视频完整数据:** ${JSON.stringify(topVideos.map(v => ({
+    - **精选的3个视频完整数据:** ${JSON.stringify(selectedVideos.map(v => ({
         aweme_id: v.aweme_id,
         desc: v.desc,
         create_time: v.create_time,
@@ -280,26 +329,26 @@ async function performAiAnalysis(ai, commercialData, allVideos, topVideos) {
     - **外部因素影响:** 分析外部因素对数据表现的影响
     - **平台算法影响:** 分析平台算法变化对数据的影响
 
-    ## 四、Top3爆款视频专项分析
+    ## 四、Top3精选视频专项分析
 
     ### 4.1 视频内容深度解析
-    **基于对3个最高播放量视频的直接观看分析：**
+    **基于对3个精选视频的直接观看分析：**
 
-    #### 视频1: ${topVideos[0]?.desc?.substring(0, 50) || 'N/A'}...
+    #### 视频1: ${selectedVideos[0]?.desc?.substring(0, 50) || 'N/A'}...
     - **内容主题:** [基于视频内容分析]
     - **叙事结构:** [分析视频的叙事方式和节奏]
     - **视觉呈现:** [分析拍摄手法、剪辑风格、色彩搭配]
     - **语言表达:** [分析说话方式、语调特点、情感表达]
     - **吸引点分析:** [分析视频的钩子和吸引观众的关键要素]
 
-    #### 视频2: ${topVideos[1]?.desc?.substring(0, 50) || 'N/A'}...
+    #### 视频2: ${selectedVideos[1]?.desc?.substring(0, 50) || 'N/A'}...
     - **内容主题:** [基于视频内容分析]
     - **叙事结构:** [分析视频的叙事方式和节奏]
     - **视觉呈现:** [分析拍摄手法、剪辑风格、色彩搭配]
     - **语言表达:** [分析说话方式、语调特点、情感表达]
     - **吸引点分析:** [分析视频的钩子和吸引观众的关键要素]
 
-    #### 视频3: ${topVideos[2]?.desc?.substring(0, 50) || 'N/A'}...
+    #### 视频3: ${selectedVideos[2]?.desc?.substring(0, 50) || 'N/A'}...
     - **内容主题:** [基于视频内容分析]
     - **叙事结构:** [分析视频的叙事方式和节奏]
     - **视觉呈现:** [分析拍摄手法、剪辑风格、色彩搭配]
@@ -347,7 +396,7 @@ async function performAiAnalysis(ai, commercialData, allVideos, topVideos) {
     - **互动效果预期:** [基于互动率分析]
     - **转化效果预期:** [基于用户粘性和商业价值评估]
     
-    ---SEPARATOR---
+    ---
 
     ### 任务二：生成简洁审核意见
     请根据分析结果，给出以下四种评级之一：
@@ -359,79 +408,158 @@ async function performAiAnalysis(ai, commercialData, allVideos, topVideos) {
     请只输出评级结果，不要添加其他说明。
   `;
 
-  const videoUrls = topVideos.map(video => video.video.play_addr.url_list[0].replace('playwm', 'play')).filter(Boolean);
-  console.log(`Downloading ${videoUrls.length} videos for inline analysis...`);
+    // 准备输入内容
+    const videoParts = videoBuffers.map(buffer => ({
+        inlineData: {
+            data: buffer.toString('base64'),
+            mimeType: 'video/mp4',
+        },
+    }));
 
-  const downloadPromises = videoUrls.map(async (url, index) => {
-    try {
-      const response = await fetch(url, { headers: { 'User-Agent': 'Mozilla/5.0' }, timeout: 30000 });
-      if (!response.ok) throw new Error(`HTTP ${response.status}`);
-      const buffer = await response.buffer();
-      if (buffer.length < 1000) {
-        console.warn(`Video ${index + 1} seems too small.`);
-        return null;
-      }
-      return buffer;
-    } catch (error) {
-      console.error(`Failed to download video ${index + 1} from ${url}:`, error.message);
-      return null;
+    const contents = [{ role: 'user', parts: [{ text: prompt }, ...videoParts] }];
+    
+    const model = ai.getGenerativeModel({
+        model: 'gemini-2.5-flash',
+        tools: [{ functionDeclarations: [analysisGeneratorTool] }],
+        tool_config: { functionCallingConfig: { mode: "REQUIRED", allowedFunctionNames: ["analysis_generator"] } },
+    });
+
+    const result = await model.generateContent({ contents });
+    const call = result.response.functionCalls()[0];
+
+    if (!call || call.name !== 'analysis_generator' || !call.args) {
+        throw new Error('AI response did not follow the required structure.');
     }
-  });
 
-  const videoBuffers = (await Promise.all(downloadPromises)).filter(Boolean);
-  console.log(`Successfully downloaded ${videoBuffers.length}/${videoUrls.length} videos.`);
-
-  const videoParts = videoBuffers.map(buffer => ({
-    inlineData: {
-      data: buffer.toString('base64'),
-      mimeType: 'video/mp4',
-    },
-  }));
-
-  const model = ai.getGenerativeModel({ model: 'gemini-1.5-flash' });
-  const contents = [{ parts: [{ text: prompt }] }];
-  if (videoParts.length > 0) {
-    contents[0].parts.push(...videoParts);
-    console.log(`Calling Gemini with ${videoParts.length} inline videos.`);
-  } else {
-    console.warn("Calling Gemini with text prompt only, as no videos were downloaded.");
-  }
-
-  const result = await model.generateContent({ contents });
-  const response = result.response;
-  
-  if (!response) {
-      console.error('❌ Gemini API did not return a valid response object.');
-      throw new Error('Invalid response from Gemini API');
-  }
-
-  const responseText = response.text();
-
-  console.log(`Gemini response received. Length: ${responseText.length}`);
-  const responseParts = responseText.split('---SEPARATOR---');
-
-  if (responseParts.length < 2) {
-    console.error('AI response split failed.');
-    throw new Error('AI response split failed');
-  }
-
-  const reportMarkdown = responseParts[0].trim();
-  const reviewOpinion = responseParts[1].replace(/^###\s*任务二：生成简洁审核意见\s*/i, '').trim();
-
-  return { reportMarkdown, reviewOpinion };
+    return {
+        reportMarkdown: call.args.reportMarkdown.trim(),
+        reviewOpinion: call.args.reviewOpinion.trim(),
+    };
 }
 
+
+// --- 主处理函数 (已重构) ---
+module.exports = async function handler(req, res) {
+  if (req.method !== 'POST') {
+    return res.status(405).json({ error: 'Method Not Allowed. Please use POST.' });
+  }
+
+  const GEMINI_API_KEY = process.env.GEMINI_API_KEY;
+  if (!GEMINI_API_KEY) {
+    console.error('GEMINI_API_KEY is not configured.');
+    return res.status(500).json({ error: 'GEMINI_API_KEY is not configured.' });
+  }
+
+  try {
+    const { messages } = req.body;
+
+    if (!messages || !Array.isArray(messages) || messages.length === 0) {
+      console.log('Received queue request with no messages.');
+      return res.status(200).json({ success: true, message: 'No messages to process.' });
+    }
+
+    const message = messages[0];
+    console.log(`Processing message ID: ${message.id}`);
+
+    const { feishuRecordId, commercialData, creatorHandle, env, accessToken } = message.body;
+
+    if (!feishuRecordId || !commercialData || !creatorHandle || !env || !accessToken) {
+      console.error('Message body is missing required parameters.', message.body);
+      return res.status(200).json({ error: 'Bad Request. Message body missing required parameters.' });
+    }
+    
+    console.log(`Starting analysis for Feishu Record ID: ${feishuRecordId}`);
+    
+    const ai = new GoogleGenerativeAI(GEMINI_API_KEY);
+
+    // 1. 获取TikTok数据
+    console.log('Step 1: Fetching TikTok data...');
+    const { allVideos } = await getTiktokData(creatorHandle);
+    
+    console.log('=== TikTok数据获取结果 ===');
+    console.log(`📊 获取到的视频总数: ${allVideos.length} 条`);
+    
+    if (allVideos.length === 0) {
+      console.log(`No public TikTok videos found for ${creatorHandle}. Updating Feishu record and stopping.`);
+      const reviewOpinion = '数据不足';
+      const reportMarkdown = `未能获取到创作者 ${creatorHandle} 的任何公开视频数据，分析流程已中止。`;
+      await performCompleteFeishuOperations(feishuRecordId, reviewOpinion, reportMarkdown, creatorHandle, env, accessToken, commercialData);
+      return res.status(200).json({ success: true, message: 'No videos found, process terminated after updating Feishu.' });
+    }
+
+    // 2. 智能筛选视频
+    console.log('Step 2: Selecting videos with AI...');
+    const { beautyVideos, videosForAnalysis } = await selectVideosWithGemini(ai, allVideos);
+    console.log(`Identified ${beautyVideos.length} beauty videos. Selected ${videosForAnalysis.length} for deep dive.`);
+
+    // 3. 下载已选视频内容
+    console.log('Step 3: Downloading selected videos for analysis...');
+    const videoUrls = videosForAnalysis.map(video => video.video.play_addr.url_list[0].replace('playwm', 'play')).filter(Boolean);
+    console.log(`Downloading ${videoUrls.length} videos...`);
+
+    const downloadPromises = videoUrls.map(async (url, index) => {
+      try {
+        const response = await fetch(url, { headers: { 'User-Agent': 'Mozilla/5.0' }, timeout: 30000 });
+        if (!response.ok) throw new Error(`HTTP ${response.status}`);
+        const buffer = await response.buffer();
+        if (buffer.length < 1000) {
+          console.warn(`Video ${index + 1} seems too small.`);
+          return null;
+        }
+        return buffer;
+      } catch (error) {
+        console.error(`Failed to download video ${index + 1} from ${url}:`, error.message);
+        return null;
+      }
+    });
+
+    const videoBuffers = (await Promise.all(downloadPromises)).filter(Boolean);
+    console.log(`Successfully downloaded ${videoBuffers.length}/${videoUrls.length} videos.`);
+
+    // 4. 进行AI分析
+    console.log('Step 4: Starting structured AI analysis...');
+    let reportMarkdown, reviewOpinion;
+    try {
+      const analysisResult = await generateStructuredAnalysis(ai, commercialData, allVideos, videosForAnalysis, beautyVideos, videoBuffers);
+      reportMarkdown = analysisResult.reportMarkdown;
+      reviewOpinion = analysisResult.reviewOpinion;
+    } catch (aiError) {
+      console.error(`Gemini analysis failed for record ${feishuRecordId}:`, aiError.stack);
+      reviewOpinion = 'gemini分析异常';
+      reportMarkdown = `在为创作者 ${creatorHandle} 生成分析报告时，Gemini API 调用失败。分析流程已中止。\n\n**错误详情:**\n\`\`\`\n${aiError.message}\n\`\`\``;
+      await performCompleteFeishuOperations(feishuRecordId, reviewOpinion, reportMarkdown, creatorHandle, env, accessToken, commercialData);
+      return res.status(200).json({ success: true, message: 'Gemini analysis failed, process terminated after updating Feishu.' });
+    }
+
+    // 5. 更新飞书
+    console.log('Step 5: Updating Feishu table with Gemini analysis content...');
+    await performCompleteFeishuOperations(feishuRecordId, reviewOpinion, reportMarkdown, creatorHandle, env, accessToken, commercialData);
+
+    console.log('All operations completed successfully');
+    return res.status(200).json({ success: true, message: 'All operations completed' });
+
+  } catch (error) {
+    console.error("Error in Vercel Gemini Orchestrator:", error.stack);
+    return res.status(500).json({ error: 'Internal Server Error', details: error.message });
+  }
+}
+
+// --- 现有辅助函数 (部分保持不变) ---
+
 async function performCompleteFeishuOperations(feishuRecordId, reviewOpinion, reportMarkdown, creatorHandle, env, accessToken, commercialData) {
-  console.log('Starting complete Feishu operations (text-only mode)...');
+  console.log('Starting complete Feishu operations...');
   
   const creatorName = commercialData['创作者名称'];
+  // 使用飞书搜索API找到所有同名创作者的记录
   const allRecordIds = await searchRecordsByCreatorName(creatorName, env, accessToken);
   
   console.log(`Found ${allRecordIds.length} records for creator: ${creatorName}`);
   
   if (allRecordIds.length > 0) {
+    // 批量更新所有找到的记录
     await updateMultipleFeishuRecords(allRecordIds, reviewOpinion, reportMarkdown, env, accessToken);
   } else {
+    // 如果搜索不到，则只更新当前记录（作为兜底）
     await updateFeishuRecordWithText(feishuRecordId, reviewOpinion, reportMarkdown, env, accessToken);
   }
   
@@ -441,11 +569,7 @@ async function performCompleteFeishuOperations(feishuRecordId, reviewOpinion, re
 const MAIN_API_URL = 'https://tiktok-user-posts.1170731839.workers.dev/';
 const BACKUP_API_URL = 'https://web-fetch-user-post.1170731839.workers.dev/';
 
-/**
- * Maps an item from the backup API response to the standard video format.
- */
 function mapBackupItemToStandardFormat(item) {
-  // Return a well-formed object, handling potential nulls from the API response.
   return {
     aweme_id: item.id || '',
     desc: item.desc || '',
@@ -484,10 +608,6 @@ function mapBackupItemToStandardFormat(item) {
   };
 }
 
-
-/**
- * Fetches videos from the main API with pagination.
- */
 async function fetchFromMainApi(uniqueId, maxVideos) {
     const BATCH_SIZE = 50;
     let allVideos = [];
@@ -525,16 +645,12 @@ async function fetchFromMainApi(uniqueId, maxVideos) {
     return allVideos;
 }
 
-/**
- * Fetches videos from the backup API with pagination and maps them to the standard format.
- */
 async function fetchFromBackupApi(uniqueId, maxVideos) {
-    // Note: The backup API's 'count' param is fixed at 20 and cannot be changed.
     let allVideos = [];
     let hasMore = true;
     let cursor = '0';
     let requestCount = 0;
-    const MAX_REQUESTS = 10; // To prevent infinite loops
+    const MAX_REQUESTS = 10; 
 
     while (hasMore && allVideos.length < maxVideos && requestCount < MAX_REQUESTS) {
         requestCount++;
@@ -563,9 +679,6 @@ async function fetchFromBackupApi(uniqueId, maxVideos) {
     return allVideos;
 }
 
-/**
- * Orchestrator function to get TikTok data, with fallback logic.
- */
 async function getTiktokData(uniqueId) {
     const MAX_VIDEOS = 100;
     let allVideos = [];
@@ -575,36 +688,25 @@ async function getTiktokData(uniqueId) {
     try {
         console.log('Attempting to fetch from Main API...');
         allVideos = await fetchFromMainApi(uniqueId, MAX_VIDEOS);
-        if (allVideos.length > 0) {
-            console.log(`Successfully fetched ${allVideos.length} videos from Main API.`);
-        } else {
+        if (allVideos.length === 0) {
             console.log('Main API returned no videos. Will try Backup API.');
         }
     } catch (error) {
         console.error(`Failed to fetch from Main API: ${error.message}. Falling back to Backup API.`);
-        allVideos = []; // Reset in case of partial success before error
+        allVideos = [];
     }
 
     if (allVideos.length === 0) {
         try {
             console.log('Attempting to fetch from Backup API...');
             allVideos = await fetchFromBackupApi(uniqueId, MAX_VIDEOS);
-            if (allVideos.length > 0) {
-                console.log(`Successfully fetched and mapped ${allVideos.length} videos from Backup API.`);
-            } else {
-                console.log('Backup API also returned no videos.');
-            }
         } catch (error) {
             console.error(`Failed to fetch from Backup API: ${error.message}`);
-            // Both failed, allVideos is already empty.
         }
     }
-
-    console.log(`Total videos fetched: ${allVideos.length}`);
-    const sortedVideos = allVideos.sort((a, b) => (b.statistics?.play_count || 0) - (a.statistics?.play_count || 0));
-    const topVideos = sortedVideos.slice(0, 3);
     
-    return { allVideos, topVideos };
+    console.log(`Successfully fetched ${allVideos.length} total videos.`);
+    return { allVideos }; // 返回所有视频，不再预先排序和切片
 }
 
 async function searchRecordsByCreatorName(creatorName, env, accessToken) {
