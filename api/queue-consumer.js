@@ -1,6 +1,6 @@
 // in multi-gemini-proxy/api/queue-consumer.js
 
-const { GoogleGenerativeAI, HarmCategory, HarmBlockThreshold } = require('@google/generative-ai');
+const { GoogleGenAI } = require('@google/genai');
 const fetch = require('node-fetch');
 // 导入内部API函数
 const feishuOperations = require('./feishu-operations.js');
@@ -8,13 +8,13 @@ const feishuOperations = require('./feishu-operations.js');
 // --- 新增：视频智能筛选函数 ---
 /**
  * 使用Gemini 1.5 Flash模型，基于视频描述智能选择视频。
- * @param {GoogleGenerativeAI} ai - GoogleGenerativeAI实例。
+ * @param {GoogleGenAI} ai - GoogleGenAI 实例。
  * @param {Array} allVideos - 包含所有视频数据的数组。
  * @returns {Promise<{beautyVideos: Array, videosForAnalysis: Array}>} - 返回包含所有美妆视频和用于分析的3个视频的对象。
  */
 async function selectVideosWithGemini(ai, allVideos) {
     console.log('Starting video selection with Gemini 1.5 Flash...');
-    const model = ai.getGenerativeModel({ model: 'gemini-1.5-flash' });
+    // 使用最新 genai SDK 的直接调用，无需 getGenerativeModel
 
     const videoSelectorTool = {
         name: 'video_selector',
@@ -62,20 +62,49 @@ async function selectVideosWithGemini(ai, allVideos) {
     `;
 
     try {
-        const result = await model.generateContent({
-            contents: [{ parts: [{ text: prompt }] }],
-            tools: [{ functionDeclarations: [videoSelectorTool] }],
-            tool_config: { functionCallingConfig: { mode: "REQUIRED", allowedFunctionNames: ["video_selector"] } },
+        const response = await ai.models.generateContent({
+            model: 'gemini-1.5-flash',
+            contents: prompt,
+            config: {
+                responseMimeType: 'application/json',
+                responseSchema: {
+                    type: 'object',
+                    properties: {
+                        videos: {
+                            type: 'array',
+                            items: {
+                                type: 'object',
+                                properties: {
+                                    id: { type: 'string' },
+                                    reason: { type: 'string' },
+                                },
+                                required: ['id', 'reason'],
+                                additionalProperties: false,
+                            },
+                        },
+                    },
+                    required: ['videos'],
+                    additionalProperties: false,
+                },
+            },
         });
 
-        const call = result.response.functionCalls()[0];
-        if (!call || call.name !== 'video_selector' || !call.args.videos) {
-            console.warn('Gemini did not return valid video selections. Proceeding without beauty category analysis.');
+        let data;
+        try {
+            data = JSON.parse(response.text);
+        } catch (e) {
+            console.warn('Gemini did not return valid JSON for video selection. Falling back.', e.message);
             const videosForAnalysis = allVideos.sort((a, b) => b.statistics.play_count - a.statistics.play_count).slice(0, 3);
             return { beautyVideos: [], videosForAnalysis };
         }
 
-        const beautyVideoIds = new Set(call.args.videos.map(v => v.id));
+        if (!data || !Array.isArray(data.videos)) {
+            console.warn('Gemini JSON missing required "videos" array. Falling back.');
+            const videosForAnalysis = allVideos.sort((a, b) => b.statistics.play_count - a.statistics.play_count).slice(0, 3);
+            return { beautyVideos: [], videosForAnalysis };
+        }
+
+        const beautyVideoIds = new Set(data.videos.map(v => v.id));
         console.log(`Gemini identified ${beautyVideoIds.size} beauty videos.`);
 
         const beautyVideos = allVideos.filter(v => beautyVideoIds.has(v.aweme_id));
@@ -112,7 +141,7 @@ async function selectVideosWithGemini(ai, allVideos) {
 // --- 新增：结构化分析报告生成函数 ---
 /**
  * 使用Gemini模型生成结构化的分析报告。
- * @param {GoogleGenerativeAI} ai - GoogleGenerativeAI实例。
+ * @param {GoogleGenAI} ai - GoogleGenAI 实例。
  * @param {object} commercialData - 商业合作数据。
  * @param {Array} allVideos - 所有视频的统计数据。
  * @param {Array} selectedVideos - 被选中的3个视频的完整数据。
@@ -215,23 +244,38 @@ async function generateStructuredAnalysis(ai, commercialData, allVideos, selecte
     }));
 
     const contents = [{ role: 'user', parts: [{ text: prompt }, ...videoParts] }];
-    
-    const model = ai.getGenerativeModel({
+
+    const response = await ai.models.generateContent({
         model: 'gemini-2.5-flash',
-        tools: [{ functionDeclarations: [analysisGeneratorTool] }],
-        tool_config: { functionCallingConfig: { mode: "REQUIRED", allowedFunctionNames: ["analysis_generator"] } },
+        contents,
+        config: {
+            responseMimeType: 'application/json',
+            responseSchema: {
+                type: 'object',
+                properties: {
+                    reportMarkdown: { type: 'string' },
+                    reviewOpinion: { type: 'string' },
+                },
+                required: ['reportMarkdown', 'reviewOpinion'],
+                additionalProperties: false,
+            },
+        },
     });
 
-    const result = await model.generateContent({ contents });
-    const call = result.response.functionCalls()[0];
+    let data;
+    try {
+        data = JSON.parse(response.text);
+    } catch (e) {
+        throw new Error(`AI did not return valid JSON: ${e.message}`);
+    }
 
-    if (!call || call.name !== 'analysis_generator' || !call.args) {
-        throw new Error('AI response did not follow the required structure.');
+    if (!data || typeof data.reportMarkdown !== 'string' || typeof data.reviewOpinion !== 'string') {
+        throw new Error('AI JSON missing required fields: reportMarkdown/reviewOpinion');
     }
 
     return {
-        reportMarkdown: call.args.reportMarkdown.trim(),
-        reviewOpinion: call.args.reviewOpinion.trim(),
+        reportMarkdown: data.reportMarkdown.trim(),
+        reviewOpinion: data.reviewOpinion.trim(),
     };
 }
 
@@ -268,7 +312,7 @@ module.exports = async function handler(req, res) {
     
     console.log(`Starting analysis for Feishu Record ID: ${feishuRecordId}`);
     
-    const ai = new GoogleGenerativeAI(GEMINI_API_KEY);
+    const ai = new GoogleGenAI({ apiKey: GEMINI_API_KEY });
 
     // 1. 获取TikTok数据
     console.log('Step 1: Fetching TikTok data...');
