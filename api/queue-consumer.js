@@ -1,6 +1,6 @@
 // in multi-gemini-proxy/api/queue-consumer.js
 
-const { GoogleGenerativeAI } = require('@google/genai');
+const { GoogleGenerativeAI } = require('@google/generative-ai');
 const fetch = require('node-fetch');
 // 导入内部API函数
 const feishuOperations = require('./feishu-operations.js');
