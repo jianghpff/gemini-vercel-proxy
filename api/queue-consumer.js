@@ -1,6 +1,6 @@
 // in multi-gemini-proxy/api/queue-consumer.js
 
-const { GoogleGenAI } = require('@google/genai');
+const { GoogleGenerativeAI } = require('@google/genai');
 const fetch = require('node-fetch');
 // 导入内部API函数
 const feishuOperations = require('./feishu-operations.js');
@@ -51,7 +51,7 @@ module.exports = async function handler(req, res) {
       console.log(`No public TikTok videos found for ${creatorHandle}.`);
     }
 
-    const ai = new GoogleGenAI(GEMINI_API_KEY);
+    const ai = new GoogleGenerativeAI(GEMINI_API_KEY);
     
     // 2. 进行AI分析
     console.log('Step 2: Starting AI analysis...');
