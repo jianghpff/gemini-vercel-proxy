@@ -47,15 +47,33 @@ module.exports = async function handler(req, res) {
     console.log(`🎯 用于视频分析的Top视频数: ${topVideos.length} 条`);
     console.log('==========================');
     
+    // 如果最终没有获取到任何视频，则更新飞书并中止
     if (allVideos.length === 0) {
-      console.log(`No public TikTok videos found for ${creatorHandle}.`);
+      console.log(`No public TikTok videos found for ${creatorHandle}. Updating Feishu record and stopping.`);
+      const reviewOpinion = '数据不足';
+      const reportMarkdown = `未能获取到创作者 ${creatorHandle} 的任何公开视频数据，分析流程已中止。`;
+      await performCompleteFeishuOperations(feishuRecordId, reviewOpinion, reportMarkdown, creatorHandle, env, accessToken, commercialData);
+      return res.status(200).json({ success: true, message: 'No videos found, process terminated after updating Feishu.' });
     }
 
     const ai = new GoogleGenerativeAI(GEMINI_API_KEY);
     
-    // 2. 进行AI分析
+    // 2. 进行AI分析，并处理可能发生的异常
     console.log('Step 2: Starting AI analysis...');
-    const { reportMarkdown, reviewOpinion } = await performAiAnalysis(ai, commercialData, allVideos, topVideos);
+    let reportMarkdown, reviewOpinion;
+    try {
+      const analysisResult = await performAiAnalysis(ai, commercialData, allVideos, topVideos);
+      reportMarkdown = analysisResult.reportMarkdown;
+      reviewOpinion = analysisResult.reviewOpinion;
+    } catch (aiError) {
+      console.error(`Gemini analysis failed for record ${feishuRecordId}:`, aiError.stack);
+      // 如果AI分析失败，则更新飞书为异常状态并中止
+      reviewOpinion = 'gemini分析异常';
+      reportMarkdown = `在为创作者 ${creatorHandle} 生成分析报告时，Gemini API 调用失败。分析流程已中止。\n\n**错误详情:**\n\`\`\`\n${aiError.message}\n\`\`\``;
+      await performCompleteFeishuOperations(feishuRecordId, reviewOpinion, reportMarkdown, creatorHandle, env, accessToken, commercialData);
+      // 返回成功响应以防止队列重试
+      return res.status(200).json({ success: true, message: 'Gemini analysis failed, process terminated after updating Feishu.' });
+    }
 
     // 3. 直接更新飞书表格
     console.log('Step 3: Updating Feishu table with Gemini analysis content...');
