@@ -10,7 +10,7 @@ const feishuOperations = require('./feishu-operations.js');
  * 使用Gemini 1.5 Flash模型，基于视频描述智能选择视频。
  * @param {GoogleGenerativeAI} ai - GoogleGenerativeAI实例。
  * @param {Array} allVideos - 包含所有视频数据的数组。
- * @returns {Promise<Array>} - 返回3个被选中的视频对象的数组。
+ * @returns {Promise<{beautyVideos: Array, videosForAnalysis: Array}>} - 返回包含所有美妆视频和用于分析的3个视频的对象。
  */
 async function selectVideosWithGemini(ai, allVideos) {
     console.log('Starting video selection with Gemini 1.5 Flash...');
@@ -116,304 +116,102 @@ async function selectVideosWithGemini(ai, allVideos) {
  * @param {object} commercialData - 商业合作数据。
  * @param {Array} allVideos - 所有视频的统计数据。
  * @param {Array} selectedVideos - 被选中的3个视频的完整数据。
+ * @param {Array} beautyVideos - 所有美妆视频的数据。
  * @param {Array} videoBuffers - 3个视频的文件Buffer。
  * @returns {Promise<object>} - 返回包含reportMarkdown和reviewOpinion的对象。
  */
-async function generateStructuredAnalysis(ai, commercialData, allVideos, selectedVideos, videoBuffers) {
+async function generateStructuredAnalysis(ai, commercialData, allVideos, selectedVideos, beautyVideos, videoBuffers) {
     console.log('Starting structured analysis with Gemini 2.5 Flash...');
     
-    // 定义强制输出的工具（Schema）
     const analysisGeneratorTool = {
         name: "analysis_generator",
         description: "生成创作者能力深度分析报告和审核意见",
         parameters: {
             type: "OBJECT",
             properties: {
-                reportMarkdown: {
-                    type: "STRING",
-                    description: "完整的Markdown格式的创作者能力分析报告，对应任务一的输出。",
-                },
-                reviewOpinion: {
-                    type: "STRING",
-                    description: "简洁的审核意见，对应任务二的输出（例如：'强烈推荐', '值得考虑'等）。",
-                },
+                reportMarkdown: { type: "STRING", description: "完整的Markdown格式的创作者能力分析报告，对应任务一的输出。" },
+                reviewOpinion: { type: "STRING", description: "简洁的审核意见，对应任务二的输出（例如：'强烈推荐', '值得考虑'等）。" },
             },
             required: ["reportMarkdown", "reviewOpinion"],
         },
     };
 
-    // 保留用户原有的Prompt
+    const beautyVideoAnalysisData = beautyVideos.length > 0 
+        ? JSON.stringify(beautyVideos.map(v => ({ aweme_id: v.aweme_id, desc: v.desc, statistics: v.statistics })), null, 2)
+        : '无';
+
     const prompt = `
     你是一位顶级的短视频内容分析与商业合作策略专家。你的任务是基于以下信息，深度分析一位TikTok创作者的创作风格、擅长方向、创作能力和商业化潜力：
-    1.  **商业合作数据**：来自品牌方的表格，包含粉丝数、历史销售额等。这些数据是创作者在平台上的整体表现，并非是和我们品牌合作的历史数据。其中GMV是创作者在平台上的整体销售额，并非获得的整体佣金。而商业数据中的佣金，是指我们为此产品设置的公开创作佣金，并非太多实际含义，另外预计发布率，是指创作者过去30天在与品牌合作过程中的履约指标，91%代表100个合作中会履约91个。
-    2.  **近100条视频的完整统计数据**：包含所有视频的描述、播放、点赞、评论等统计数据。
-    3.  **播放量最高的3个视频的实际文件**：我已将视频文件作为输入提供给你，你可以直接"观看"并分析其内容。
-    4.  **请你将分析的重点放在提供给你的视频的统计数据上**：这反映了创作者的创作的内容受平台或者消费者喜爱的程度：
-    5.  **近三十天销售额 这个指标低于10000泰铢 是一个不太理想的值。预计发布率低于85%，说明存在履约不足，有较多合作违约发生的情况**
-    6.  **若某位达人存在3条以上的视频提到同一款产品，说明这个达人在和品牌方进行合作时，会倾向于多发视频，这是一个高势能的指标**
-    7.  **我们当前品牌是处于美妆个护类目下，所以若达人存在美妆个护类的相关视频，请你重点分析。**
-    8.  **提供的商业数据中的视频平均观看量是指创作者所有的视频的平均观看量(包括电商视频和非电商视频)，并非是和我们品牌合作的历史数据。请你不要忘记**
+    1.  **商业合作数据**：来自品牌方的表格，包含粉丝数、历史销售额等。
+    2.  **近100条视频的完整统计数据**：包含所有视频的描述、播放、点赞、评论等。
+    3.  **精选的3个代表性视频的实际文件**：我已将视频文件作为输入提供给你，你可以直接"观看"并分析其内容。
+    4.  **所有美妆护肤类视频的数据**：这是从100个视频中识别出的所有美妆护肤内容，用于专项分析。
+    5.  **核心指令**：
+        - **重点分析统计数据**: 统计数据是评估内容受欢迎程度的核心。
+        - **关注商业指标**: 近三十天销售额低于10000泰铢或预计发布率低于85%是负面信号。
+        - **识别高合作意向**: 3条以上视频提到同款产品是高势能指标。
+        - **侧重美妆内容**: 我们是美妆个护品牌，请重点分析与此相关的内容。
 
     请你整合所有信息，完成以下两个任务，并严格按照 "analysis_generator" 工具的格式要求，将两个任务的结果分别填入对应的参数中。
 
     ---
-    ### 飞书多维表格商业数据
-    **创作者基础信息:**
-    - **创作者Handle:** ${commercialData['创作者 Handle'] || 'N/A'}
-    - **创作者名称:** ${commercialData['创作者名称'] || 'N/A'}
+    ### 注入数据
     
-    **数据指标:**
-    - **粉丝数:** ${commercialData['粉丝数'] || 'N/A'}
-    - **预计发布率:** ${commercialData['预计发布率'] || 'N/A'}
-    - **近三十天销售额:** ¥${commercialData['销售额'] || 'N/A'}
-    - **视频平均观看量:** ${commercialData['视频平均观看量'] || 'N/A'}
-    
-    **产品信息:**
-    - **产品名称:** ${commercialData['产品名称'] || 'N/A'}
-  
-    
-    **完整商业数据JSON:**
+    **1. 飞书多维表格商业数据:**
     \`\`\`json
     ${JSON.stringify(commercialData, null, 2)}
     \`\`\`
-    - **近100条视频完整统计数据:** ${JSON.stringify(allVideos.map(v => ({
-        aweme_id: v.aweme_id,
-        desc: v.desc,
-        create_time: v.create_time,
-        statistics: v.statistics,
-        cha_list: v.cha_list,
-        text_extra: v.text_extra
+    
+    **2. 近100条视频完整统计数据:**
+    \`\`\`json
+    ${JSON.stringify(allVideos.map(v => ({
+        aweme_id: v.aweme_id, desc: v.desc, create_time: v.create_time, statistics: v.statistics
     })), null, 2)}
-    - **精选的3个视频完整数据:** ${JSON.stringify(selectedVideos.map(v => ({
-        aweme_id: v.aweme_id,
-        desc: v.desc,
-        create_time: v.create_time,
-        statistics: v.statistics,
-        cha_list: v.cha_list,
-        text_extra: v.text_extra,
-        author: v.author
+    \`\`\`
+    
+    **3. 精选的3个视频完整数据:**
+    \`\`\`json
+    ${JSON.stringify(selectedVideos.map(v => ({
+        aweme_id: v.aweme_id, desc: v.desc, create_time: v.create_time, statistics: v.statistics
     })), null, 2)}
+    \`\`\`
+
+    **4. 全部美妆护肤类视频数据:**
+    \`\`\`json
+    ${beautyVideoAnalysisData}
+    \`\`\`
     ---
 
     ### 任务一：生成创作者能力深度分析报告 (Markdown)
-    请严格按照以下结构生成一份专业的创作者能力分析报告，要求层级分明，格式规范：
+    请严格按照以下结构生成一份专业的创作者能力分析报告：
 
     # 创作者能力与商业化价值分析报告
 
     ## 一、数据概览与整体表现
+    - **基础信息:** 创作者: ${commercialData['创作者名称'] || 'N/A'} (@${commercialData['创作者 Handle'] || 'N/A'}), 粉丝数: ${commercialData['粉丝数'] || 'N/A'}
+    - **内容数据统计 (近100条):** 分析了 ${allVideos.length} 条视频, 平均播放量: ${Math.round(allVideos.reduce((sum, v) => sum + (v.statistics.play_count || 0), 0) / (allVideos.length || 1)).toLocaleString()}, 最高播放量: ${Math.max(...allVideos.map(v => v.statistics.play_count || 0)).toLocaleString()}
 
-    ### 1.1 基础信息
-    - **创作者名称:** ${commercialData['创作者名称'] || 'N/A'}
-    - **创作者Handle:** @${commercialData['创作者 Handle'] || 'N/A'}
-    - **粉丝数量:** ${commercialData['粉丝数'] || 'N/A'}
-    - **预计发布率:** ${commercialData['预计发布率'] || 'N/A'}
-    - **视频平均观看量:** ${commercialData['视频平均观看量'] || 'N/A'}
-    
+    ## 二、美妆护肤类目专项分析
+    - **美妆内容占比:** ${beautyVideos.length} / ${allVideos.length} (${(allVideos.length > 0 ? (beautyVideos.length / allVideos.length) * 100 : 0).toFixed(1)}%)
+    - **内容垂直度评估:** [基于美妆内容的数量、占比和内容描述，分析创作者在该领域的垂直度和专业性。]
+    - **美妆内容表现:** [分析美妆类视频的平均播放量、互动率等数据，并与创作者的整体数据进行对比。]
+    - **与我方产品契合度:** [评估该创作者的美妆内容风格与我方产品的匹配程度。]
 
-    ### 1.2 内容数据统计
-    - **分析视频总数:** ${allVideos.length} 条
-    - **数据时间范围:** 基于最近100条视频的完整数据
-    - **平均播放量:** ${Math.round(allVideos.reduce((sum, v) => sum + (v.statistics.play_count || 0), 0) / allVideos.length).toLocaleString()}
-    - **平均点赞量:** ${Math.round(allVideos.reduce((sum, v) => sum + (v.statistics.digg_count || 0), 0) / allVideos.length).toLocaleString()}
-    - **平均评论量:** ${Math.round(allVideos.reduce((sum, v) => sum + (v.statistics.comment_count || 0), 0) / allVideos.length).toLocaleString()}
-    - **平均分享量:** ${Math.round(allVideos.reduce((sum, v) => sum + (v.statistics.share_count || 0), 0) / allVideos.length).toLocaleString()}
-    - **平均收藏量:** ${Math.round(allVideos.reduce((sum, v) => sum + (v.statistics.collect_count || 0), 0) / allVideos.length).toLocaleString()}
-    
-    **数据分布统计:**
-    - **最高播放量:** ${Math.max(...allVideos.map(v => v.statistics.play_count || 0)).toLocaleString()}
-    - **最低播放量:** ${Math.min(...allVideos.map(v => v.statistics.play_count || 0)).toLocaleString()}
-    - **播放量中位数:** ${allVideos.sort((a, b) => (a.statistics.play_count || 0) - (b.statistics.play_count || 0))[Math.floor(allVideos.length / 2)]?.statistics.play_count?.toLocaleString() || 'N/A'}
-    - **播放量标准差:** ${Math.sqrt(allVideos.reduce((sum, v) => sum + Math.pow((v.statistics.play_count || 0) - (allVideos.reduce((s, v2) => s + (v2.statistics.play_count || 0), 0) / allVideos.length), 2), 0) / allVideos.length).toFixed(0)}
-    
-    **互动率分析:**
-    - **平均互动率:** ${((allVideos.reduce((sum, v) => sum + (v.statistics.digg_count || 0) + (v.statistics.comment_count || 0) + (v.statistics.share_count || 0) + (v.statistics.collect_count || 0), 0) / allVideos.reduce((sum, v) => sum + (v.statistics.play_count || 0), 0)) * 100).toFixed(2)}%
-    - **点赞率:** ${((allVideos.reduce((sum, v) => sum + (v.statistics.digg_count || 0), 0) / allVideos.reduce((sum, v) => sum + (v.statistics.play_count || 0), 0)) * 100).toFixed(2)}%
-    - **评论率:** ${((allVideos.reduce((sum, v) => sum + (v.statistics.comment_count || 0), 0) / allVideos.reduce((sum, v) => sum + (v.statistics.play_count || 0), 0)) * 100).toFixed(2)}%
-    - **分享率:** ${((allVideos.reduce((sum, v) => sum + (v.statistics.share_count || 0), 0) / allVideos.reduce((sum, v) => sum + (v.statistics.play_count || 0), 0)) * 100).toFixed(2)}%
-    - **收藏率:** ${((allVideos.reduce((sum, v) => sum + (v.statistics.collect_count || 0), 0) / allVideos.reduce((sum, v) => sum + (v.statistics.play_count || 0), 0)) * 100).toFixed(2)}%
+    ## 三、Top3精选视频专项分析
+    [对提供的3个精选视频进行深度解析，分析其内容主题、叙事结构、视觉呈现和吸引观众的关键要素，并总结其共性，提炼出成功的内容模式。]
 
-    ## 二、基于全量数据的深度分析
-
-    ### 2.1 内容创作风格分析
-    - **核心创作风格:** 基于${allVideos.length}条视频的内容描述和话题标签，分析创作者的独特风格特征
-    - **内容主题分布:** 通过cha_list分析创作者关注的主要话题领域
-    - **语言表达特色:** 基于视频描述分析创作者的表达方式和语言风格
-    - **视觉呈现偏好:** 通过视频描述推断创作者的拍摄和剪辑偏好
-    - **内容多样性:** 分析创作者在不同主题和风格上的尝试和表现
-
-    ### 2.2 数据表现深度分析
-    **播放量分析:**
-    - **播放量分布规律:** 分析${allVideos.length}条视频的播放量分布，识别爆款和普通内容的差异
-    - **播放量稳定性:** 通过标准差分析创作者播放量的稳定性
-    - **播放量趋势:** 基于时间序列分析播放量的增长或下降趋势
-    - **播放量峰值:** 识别播放量最高的视频特征和成功要素
-    
-    **互动率深度分析:**
-    - **综合互动率:** 计算每条视频的综合互动率（点赞+评论+分享+收藏）/播放量
-    - **互动率分布:** 分析互动率的分布规律和稳定性
-    - **互动质量:** 评估不同互动类型的质量和价值
-    - **用户参与度:** 分析用户参与度的深度和广度
-    
-    **内容产出分析:**
-    - **发布频率:** 分析创作者的发布频率和规律
-    - **内容稳定性:** 通过数据波动分析创作者的内容产出稳定性
-    - **内容质量一致性:** 评估内容质量的一致性和可靠性
-    - **成长轨迹:** 基于时间序列分析创作者的数据增长趋势
-
-    ### 2.3 商业化能力深度评估
-    **内容传播能力:**
-    - **内容传播力:** 基于播放量和分享数评估内容传播能力
-    - **病毒传播潜力:** 分析分享率评估内容的病毒传播能力
-    - **受众覆盖范围:** 基于播放量评估内容覆盖的受众范围
-    - **传播稳定性:** 评估内容传播的稳定性和可预测性
-    
-    **用户粘性与忠诚度:**
-    - **用户粘性:** 基于点赞数和收藏数评估用户认可度和留存意愿
-    - **粉丝忠诚度:** 分析评论质量和粉丝互动深度
-    - **用户留存率:** 基于持续互动数据评估用户留存能力
-    - **社区建设能力:** 评估创作者建设活跃社区的能力
-    
-    **商业转化能力:**
-    - **互动质量:** 基于评论数评估用户参与度和社区建设能力
-    - **商业转化潜力:** 综合评估创作者的商业价值
-    - **历史销售表现:** 基于飞书表格中的销售额数据评估商业化能力
-    - **转化率预测:** 基于互动率和历史表现预测转化潜力
-    
-    **内容产出能力:**
-    - **发布率评估:** 基于预计发布率评估内容产出稳定性
-    - **内容质量一致性:** 评估内容质量的一致性和可靠性
-    - **创作效率:** 分析创作者的内容产出效率
-    - **创新持续性:** 评估创作者持续创新的能力
-    
-    **数据对比分析:**
-    - **观看量对比:** 对比飞书表格中的视频平均观看量与TikTok数据
-    - **平台表现差异:** 分析在不同平台上的表现差异
-    - **数据真实性:** 评估数据的真实性和可靠性
-
-    ## 三、全量数据统计分析
-
-    ### 3.1 数据分布特征分析
-    **播放量分布特征:**
-    - **分布形态:** 分析播放量的分布形态（正态分布、偏态分布等）
-    - **异常值识别:** 识别播放量异常高或异常低的视频
-    - **数据集中度:** 分析播放量数据的集中程度和离散程度
-    - **分位数分析:** 计算播放量的25%、50%、75%分位数
-    
-    **互动数据分布:**
-    - **点赞分布:** 分析点赞数的分布特征和规律
-    - **评论分布:** 分析评论数的分布特征和规律
-    - **分享分布:** 分析分享数的分布特征和规律
-    - **收藏分布:** 分析收藏数的分布特征和规律
-    
-    ### 3.2 时间序列分析
-    **发布趋势分析:**
-    - **发布频率变化:** 分析创作者发布频率的时间变化趋势
-    - **数据增长趋势:** 分析各项数据指标的时间增长趋势
-    - **季节性分析:** 识别数据是否存在季节性波动
-    - **周期性分析:** 分析数据是否存在周期性规律
-    
-    **内容质量趋势:**
-    - **质量稳定性:** 分析内容质量的时间稳定性
-    - **质量提升轨迹:** 评估内容质量的提升趋势
-    - **创新周期:** 分析创作者创新的周期性特征
-    
-    ### 3.3 相关性分析
-    **指标相关性:**
-    - **播放量与互动率:** 分析播放量与互动率的相关性
-    - **不同互动类型:** 分析点赞、评论、分享、收藏之间的相关性
-    - **内容类型与表现:** 分析不同内容类型与数据表现的相关性
-    - **时间与表现:** 分析发布时间与数据表现的相关性
-    
-    **影响因素分析:**
-    - **内容特征影响:** 分析内容特征对数据表现的影响
-    - **外部因素影响:** 分析外部因素对数据表现的影响
-    - **平台算法影响:** 分析平台算法变化对数据的影响
-
-    ## 四、Top3精选视频专项分析
-
-    ### 4.1 视频内容深度解析
-    **基于对3个精选视频的直接观看分析：**
-
-    #### 视频1: ${selectedVideos[0]?.desc?.substring(0, 50) || 'N/A'}...
-    - **内容主题:** [基于视频内容分析]
-    - **叙事结构:** [分析视频的叙事方式和节奏]
-    - **视觉呈现:** [分析拍摄手法、剪辑风格、色彩搭配]
-    - **语言表达:** [分析说话方式、语调特点、情感表达]
-    - **吸引点分析:** [分析视频的钩子和吸引观众的关键要素]
-
-    #### 视频2: ${selectedVideos[1]?.desc?.substring(0, 50) || 'N/A'}...
-    - **内容主题:** [基于视频内容分析]
-    - **叙事结构:** [分析视频的叙事方式和节奏]
-    - **视觉呈现:** [分析拍摄手法、剪辑风格、色彩搭配]
-    - **语言表达:** [分析说话方式、语调特点、情感表达]
-    - **吸引点分析:** [分析视频的钩子和吸引观众的关键要素]
-
-    #### 视频3: ${selectedVideos[2]?.desc?.substring(0, 50) || 'N/A'}...
-    - **内容主题:** [基于视频内容分析]
-    - **叙事结构:** [分析视频的叙事方式和节奏]
-    - **视觉呈现:** [分析拍摄手法、剪辑风格、色彩搭配]
-    - **语言表达:** [分析说话方式、语调特点、情感表达]
-    - **吸引点分析:** [分析视频的钩子和吸引观众的关键要素]
-
-    ### 4.2 爆款内容模式总结
-    - **成功要素提炼:** 基于3个爆款视频的共同特征，总结成功的内容模式
-    - **差异化优势:** 识别创作者在同领域中的独特优势
-    - **内容创新性:** 分析创作者的创意表达和创新能力
-    - **观众洞察:** 评估创作者对目标受众需求的把握程度
-
-    ## 五、创作能力综合评估
-
-    ### 4.1 内容制作能力
-    - **拍摄技巧:** [基于视频内容分析]
-    - **剪辑水平:** [基于视频内容分析]
-    - **后期制作:** [基于视频内容分析]
-    - **内容策划:** [基于全量数据分析]
-
-    ### 4.2 创意创新能力
-    - **创意表达:** [基于全量数据分析]
-    - **内容创新:** [基于全量数据分析]
-    - **持续产出:** [基于数据稳定性分析]
-
-    ### 4.3 商业价值评估
-    - **品牌合作适配性:** 分析创作者与"${commercialData['产品名称']}"产品的匹配程度
-    - **带货能力:** 基于互动率和用户粘性评估，结合历史销售额数据
-    - **内容变现潜力:** 基于数据表现和内容质量评估，参考佣金结构
-    - **长期发展前景:** 基于成长趋势和内容稳定性评估
-
-    ## 六、合作建议与风险提示
-
-    ### 5.1 合作策略建议
-    - **合作形式推荐:** [基于创作者特点提出最适合的合作形式]
-    - **内容方向建议:** [基于创作者擅长领域提出内容方向]
-
-    ### 5.2 风险提示
-    - **内容风险:** [基于risk_infos和内容分析]
-    - **数据风险:** [基于数据稳定性分析]
-    - **合作风险:** [基于产品匹配度分析]
-
-    ### 5.3 预期效果评估
-    - **传播效果预期:** [基于播放量和分享数分析]
-    - **互动效果预期:** [基于互动率分析]
-    - **转化效果预期:** [基于用户粘性和商业价值评估]
+    ## 四、合作建议与风险提示
+    - **合作策略建议:** [基于创作者特点、特别是美妆内容表现，提出最适合的合作形式和内容方向。]
+    - **风险提示:** [结合预计发布率、数据稳定性、内容风险等进行评估。]
     
     ---
 
     ### 任务二：生成简洁审核意见
-    请根据分析结果，给出以下四种评级之一：
-    - **强烈推荐**：创作者能力突出，与产品高度契合，商业化潜力巨大
-    - **值得考虑**：创作者有一定能力，与产品有一定契合度，值得进一步评估
-    - **建议观望**：创作者能力一般，与产品契合度不高，建议暂时观望
-    - **不推荐**：创作者能力不足或与产品完全不匹配，不建议合作
-    
-    请只输出评级结果，不要添加其他说明。
+    请根据分析结果，给出以下四种评级之一：'强烈推荐', '值得考虑', '建议观望', '不推荐'。
   `;
 
-    // 准备输入内容
     const videoParts = videoBuffers.map(buffer => ({
-        inlineData: {
-            data: buffer.toString('base64'),
-            mimeType: 'video/mp4',
-        },
+        inlineData: { data: buffer.toString('base64'), mimeType: 'video/mp4' },
     }));
 
     const contents = [{ role: 'user', parts: [{ text: prompt }, ...videoParts] }];
@@ -550,16 +348,13 @@ async function performCompleteFeishuOperations(feishuRecordId, reviewOpinion, re
   console.log('Starting complete Feishu operations...');
   
   const creatorName = commercialData['创作者名称'];
-  // 使用飞书搜索API找到所有同名创作者的记录
   const allRecordIds = await searchRecordsByCreatorName(creatorName, env, accessToken);
   
   console.log(`Found ${allRecordIds.length} records for creator: ${creatorName}`);
   
   if (allRecordIds.length > 0) {
-    // 批量更新所有找到的记录
     await updateMultipleFeishuRecords(allRecordIds, reviewOpinion, reportMarkdown, env, accessToken);
   } else {
-    // 如果搜索不到，则只更新当前记录（作为兜底）
     await updateFeishuRecordWithText(feishuRecordId, reviewOpinion, reportMarkdown, env, accessToken);
   }
   
