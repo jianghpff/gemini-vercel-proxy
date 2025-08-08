@@ -87,6 +87,8 @@ async function performAiAnalysis(ai, commercialData, allVideos, topVideos) {
 
     请你整合所有信息，完成以下两个任务，并在两个任务的输出之间，使用 \`---SEPARATOR---\` 作为唯一的分隔符。
 
+    **重要提示：** 请特别关注飞书多维表格中的达人的商业数据，包括销售额、预计发布率等关键指标。这些数据是评估创作者商业化能力和合作可行性的重要依据。在分析过程中，请结合这些商业数据与TikTok内容数据进行综合分析。
+
     ---
     ### 飞书多维表格商业数据
     **创作者基础信息:**
@@ -101,13 +103,29 @@ async function performAiAnalysis(ai, commercialData, allVideos, topVideos) {
     
     **产品信息:**
     - **产品名称:** ${commercialData['产品名称'] || 'N/A'}
+  
     
     **完整商业数据JSON:**
     \`\`\`json
     ${JSON.stringify(commercialData, null, 2)}
     \`\`\`
-    - **近100条视频完整统计数据:** ${JSON.stringify(allVideos.map(v => ({ aweme_id: v.aweme_id, desc: v.desc, create_time: v.create_time, statistics: v.statistics, cha_list: v.cha_list, text_extra: v.text_extra })), null, 2)}
-    - **播放量最高的3个视频完整数据:** ${JSON.stringify(topVideos.map(v => ({ aweme_id: v.aweme_id, desc: v.desc, create_time: v.create_time, statistics: v.statistics, cha_list: v.cha_list, text_extra: v.text_extra, author: v.author })), null, 2)}
+    - **近100条视频完整统计数据:** ${JSON.stringify(allVideos.map(v => ({
+        aweme_id: v.aweme_id,
+        desc: v.desc,
+        create_time: v.create_time,
+        statistics: v.statistics,
+        cha_list: v.cha_list,
+        text_extra: v.text_extra
+    })), null, 2)}
+    - **播放量最高的3个视频完整数据:** ${JSON.stringify(topVideos.map(v => ({
+        aweme_id: v.aweme_id,
+        desc: v.desc,
+        create_time: v.create_time,
+        statistics: v.statistics,
+        cha_list: v.cha_list,
+        text_extra: v.text_extra,
+        author: v.author
+    })), null, 2)}
     ---
 
     ### 任务一：生成创作者能力深度分析报告 (Markdown)
@@ -124,24 +142,201 @@ async function performAiAnalysis(ai, commercialData, allVideos, topVideos) {
     - **预计发布率:** ${commercialData['预计发布率'] || 'N/A'}
     - **视频平均观看量:** ${commercialData['视频平均观看量'] || 'N/A'}
     
+
     ### 1.2 内容数据统计
     - **分析视频总数:** ${allVideos.length} 条
+    - **数据时间范围:** 基于最近100条视频的完整数据
     - **平均播放量:** ${Math.round(allVideos.reduce((sum, v) => sum + (v.statistics.play_count || 0), 0) / allVideos.length).toLocaleString()}
     - **平均点赞量:** ${Math.round(allVideos.reduce((sum, v) => sum + (v.statistics.digg_count || 0), 0) / allVideos.length).toLocaleString()}
+    - **平均评论量:** ${Math.round(allVideos.reduce((sum, v) => sum + (v.statistics.comment_count || 0), 0) / allVideos.length).toLocaleString()}
+    - **平均分享量:** ${Math.round(allVideos.reduce((sum, v) => sum + (v.statistics.share_count || 0), 0) / allVideos.length).toLocaleString()}
+    - **平均收藏量:** ${Math.round(allVideos.reduce((sum, v) => sum + (v.statistics.collect_count || 0), 0) / allVideos.length).toLocaleString()}
+    
+    **数据分布统计:**
+    - **最高播放量:** ${Math.max(...allVideos.map(v => v.statistics.play_count || 0)).toLocaleString()}
+    - **最低播放量:** ${Math.min(...allVideos.map(v => v.statistics.play_count || 0)).toLocaleString()}
+    - **播放量中位数:** ${allVideos.sort((a, b) => (a.statistics.play_count || 0) - (b.statistics.play_count || 0))[Math.floor(allVideos.length / 2)]?.statistics.play_count?.toLocaleString() || 'N/A'}
+    - **播放量标准差:** ${Math.sqrt(allVideos.reduce((sum, v) => sum + Math.pow((v.statistics.play_count || 0) - (allVideos.reduce((s, v2) => s + (v2.statistics.play_count || 0), 0) / allVideos.length), 2), 0) / allVideos.length).toFixed(0)}
+    
+    **互动率分析:**
+    - **平均互动率:** ${((allVideos.reduce((sum, v) => sum + (v.statistics.digg_count || 0) + (v.statistics.comment_count || 0) + (v.statistics.share_count || 0) + (v.statistics.collect_count || 0), 0) / allVideos.reduce((sum, v) => sum + (v.statistics.play_count || 0), 0)) * 100).toFixed(2)}%
+    - **点赞率:** ${((allVideos.reduce((sum, v) => sum + (v.statistics.digg_count || 0), 0) / allVideos.reduce((sum, v) => sum + (v.statistics.play_count || 0), 0)) * 100).toFixed(2)}%
+    - **评论率:** ${((allVideos.reduce((sum, v) => sum + (v.statistics.comment_count || 0), 0) / allVideos.reduce((sum, v) => sum + (v.statistics.play_count || 0), 0)) * 100).toFixed(2)}%
+    - **分享率:** ${((allVideos.reduce((sum, v) => sum + (v.statistics.share_count || 0), 0) / allVideos.reduce((sum, v) => sum + (v.statistics.play_count || 0), 0)) * 100).toFixed(2)}%
+    - **收藏率:** ${((allVideos.reduce((sum, v) => sum + (v.statistics.collect_count || 0), 0) / allVideos.reduce((sum, v) => sum + (v.statistics.play_count || 0), 0)) * 100).toFixed(2)}%
 
     ## 二、基于全量数据的深度分析
-    (此处省略部分报告模板以保持简洁)
+
+    ### 2.1 内容创作风格分析
+    - **核心创作风格:** 基于${allVideos.length}条视频的内容描述和话题标签，分析创作者的独特风格特征
+    - **内容主题分布:** 通过cha_list分析创作者关注的主要话题领域
+    - **语言表达特色:** 基于视频描述分析创作者的表达方式和语言风格
+    - **视觉呈现偏好:** 通过视频描述推断创作者的拍摄和剪辑偏好
+    - **内容多样性:** 分析创作者在不同主题和风格上的尝试和表现
+
+    ### 2.2 数据表现深度分析
+    **播放量分析:**
+    - **播放量分布规律:** 分析${allVideos.length}条视频的播放量分布，识别爆款和普通内容的差异
+    - **播放量稳定性:** 通过标准差分析创作者播放量的稳定性
+    - **播放量趋势:** 基于时间序列分析播放量的增长或下降趋势
+    - **播放量峰值:** 识别播放量最高的视频特征和成功要素
     
+    **互动率深度分析:**
+    - **综合互动率:** 计算每条视频的综合互动率（点赞+评论+分享+收藏）/播放量
+    - **互动率分布:** 分析互动率的分布规律和稳定性
+    - **互动质量:** 评估不同互动类型的质量和价值
+    - **用户参与度:** 分析用户参与度的深度和广度
+    
+    **内容产出分析:**
+    - **发布频率:** 分析创作者的发布频率和规律
+    - **内容稳定性:** 通过数据波动分析创作者的内容产出稳定性
+    - **内容质量一致性:** 评估内容质量的一致性和可靠性
+    - **成长轨迹:** 基于时间序列分析创作者的数据增长趋势
+
+    ### 2.3 商业化能力深度评估
+    **内容传播能力:**
+    - **内容传播力:** 基于播放量和分享数评估内容传播能力
+    - **病毒传播潜力:** 分析分享率评估内容的病毒传播能力
+    - **受众覆盖范围:** 基于播放量评估内容覆盖的受众范围
+    - **传播稳定性:** 评估内容传播的稳定性和可预测性
+    
+    **用户粘性与忠诚度:**
+    - **用户粘性:** 基于点赞数和收藏数评估用户认可度和留存意愿
+    - **粉丝忠诚度:** 分析评论质量和粉丝互动深度
+    - **用户留存率:** 基于持续互动数据评估用户留存能力
+    - **社区建设能力:** 评估创作者建设活跃社区的能力
+    
+    **商业转化能力:**
+    - **互动质量:** 基于评论数评估用户参与度和社区建设能力
+    - **商业转化潜力:** 综合评估创作者的商业价值
+    - **历史销售表现:** 基于飞书表格中的销售额数据评估商业化能力
+    - **转化率预测:** 基于互动率和历史表现预测转化潜力
+    
+    **内容产出能力:**
+    - **发布率评估:** 基于预计发布率评估内容产出稳定性
+    - **内容质量一致性:** 评估内容质量的一致性和可靠性
+    - **创作效率:** 分析创作者的内容产出效率
+    - **创新持续性:** 评估创作者持续创新的能力
+    
+    **数据对比分析:**
+    - **观看量对比:** 对比飞书表格中的视频平均观看量与TikTok数据
+    - **平台表现差异:** 分析在不同平台上的表现差异
+    - **数据真实性:** 评估数据的真实性和可靠性
+
+    ## 三、全量数据统计分析
+
+    ### 3.1 数据分布特征分析
+    **播放量分布特征:**
+    - **分布形态:** 分析播放量的分布形态（正态分布、偏态分布等）
+    - **异常值识别:** 识别播放量异常高或异常低的视频
+    - **数据集中度:** 分析播放量数据的集中程度和离散程度
+    - **分位数分析:** 计算播放量的25%、50%、75%分位数
+    
+    **互动数据分布:**
+    - **点赞分布:** 分析点赞数的分布特征和规律
+    - **评论分布:** 分析评论数的分布特征和规律
+    - **分享分布:** 分析分享数的分布特征和规律
+    - **收藏分布:** 分析收藏数的分布特征和规律
+    
+    ### 3.2 时间序列分析
+    **发布趋势分析:**
+    - **发布频率变化:** 分析创作者发布频率的时间变化趋势
+    - **数据增长趋势:** 分析各项数据指标的时间增长趋势
+    - **季节性分析:** 识别数据是否存在季节性波动
+    - **周期性分析:** 分析数据是否存在周期性规律
+    
+    **内容质量趋势:**
+    - **质量稳定性:** 分析内容质量的时间稳定性
+    - **质量提升轨迹:** 评估内容质量的提升趋势
+    - **创新周期:** 分析创作者创新的周期性特征
+    
+    ### 3.3 相关性分析
+    **指标相关性:**
+    - **播放量与互动率:** 分析播放量与互动率的相关性
+    - **不同互动类型:** 分析点赞、评论、分享、收藏之间的相关性
+    - **内容类型与表现:** 分析不同内容类型与数据表现的相关性
+    - **时间与表现:** 分析发布时间与数据表现的相关性
+    
+    **影响因素分析:**
+    - **内容特征影响:** 分析内容特征对数据表现的影响
+    - **外部因素影响:** 分析外部因素对数据表现的影响
+    - **平台算法影响:** 分析平台算法变化对数据的影响
+
+    ## 四、Top3爆款视频专项分析
+
+    ### 4.1 视频内容深度解析
+    **基于对3个最高播放量视频的直接观看分析：**
+
+    #### 视频1: ${topVideos[0]?.desc?.substring(0, 50) || 'N/A'}...
+    - **内容主题:** [基于视频内容分析]
+    - **叙事结构:** [分析视频的叙事方式和节奏]
+    - **视觉呈现:** [分析拍摄手法、剪辑风格、色彩搭配]
+    - **语言表达:** [分析说话方式、语调特点、情感表达]
+    - **吸引点分析:** [分析视频的钩子和吸引观众的关键要素]
+
+    #### 视频2: ${topVideos[1]?.desc?.substring(0, 50) || 'N/A'}...
+    - **内容主题:** [基于视频内容分析]
+    - **叙事结构:** [分析视频的叙事方式和节奏]
+    - **视觉呈现:** [分析拍摄手法、剪辑风格、色彩搭配]
+    - **语言表达:** [分析说话方式、语调特点、情感表达]
+    - **吸引点分析:** [分析视频的钩子和吸引观众的关键要素]
+
+    #### 视频3: ${topVideos[2]?.desc?.substring(0, 50) || 'N/A'}...
+    - **内容主题:** [基于视频内容分析]
+    - **叙事结构:** [分析视频的叙事方式和节奏]
+    - **视觉呈现:** [分析拍摄手法、剪辑风格、色彩搭配]
+    - **语言表达:** [分析说话方式、语调特点、情感表达]
+    - **吸引点分析:** [分析视频的钩子和吸引观众的关键要素]
+
+    ### 4.2 爆款内容模式总结
+    - **成功要素提炼:** 基于3个爆款视频的共同特征，总结成功的内容模式
+    - **差异化优势:** 识别创作者在同领域中的独特优势
+    - **内容创新性:** 分析创作者的创意表达和创新能力
+    - **观众洞察:** 评估创作者对目标受众需求的把握程度
+
+    ## 五、创作能力综合评估
+
+    ### 4.1 内容制作能力
+    - **拍摄技巧:** [基于视频内容分析]
+    - **剪辑水平:** [基于视频内容分析]
+    - **后期制作:** [基于视频内容分析]
+    - **内容策划:** [基于全量数据分析]
+
+    ### 4.2 创意创新能力
+    - **创意表达:** [基于全量数据分析]
+    - **内容创新:** [基于全量数据分析]
+    - **持续产出:** [基于数据稳定性分析]
+
+    ### 4.3 商业价值评估
+    - **品牌合作适配性:** 分析创作者与"${commercialData['产品名称']}"产品的匹配程度
+    - **带货能力:** 基于互动率和用户粘性评估，结合历史销售额数据
+    - **内容变现潜力:** 基于数据表现和内容质量评估，参考佣金结构
+    - **长期发展前景:** 基于成长趋势和内容稳定性评估
+
     ## 六、合作建议与风险提示
+
+    ### 5.1 合作策略建议
+    - **合作形式推荐:** [基于创作者特点提出最适合的合作形式]
+    - **内容方向建议:** [基于创作者擅长领域提出内容方向]
+
+    ### 5.2 风险提示
+    - **内容风险:** [基于risk_infos和内容分析]
+    - **数据风险:** [基于数据稳定性分析]
+    - **合作风险:** [基于产品匹配度分析]
+
+    ### 5.3 预期效果评估
+    - **传播效果预期:** [基于播放量和分享数分析]
+    - **互动效果预期:** [基于互动率分析]
+    - **转化效果预期:** [基于用户粘性和商业价值评估]
     
     ---SEPARATOR---
 
     ### 任务二：生成简洁审核意见
     请根据分析结果，给出以下四种评级之一：
-    - **强烈推荐**
-    - **值得考虑**
-    - **建议观望**
-    - **不推荐**
+    - **强烈推荐**：创作者能力突出，与产品高度契合，商业化潜力巨大
+    - **值得考虑**：创作者有一定能力，与产品有一定契合度，值得进一步评估
+    - **建议观望**：创作者能力一般，与产品契合度不高，建议暂时观望
+    - **不推荐**：创作者能力不足或与产品完全不匹配，不建议合作
     
     请只输出评级结果，不要添加其他说明。
   `;
