@@ -420,54 +420,173 @@ async function performCompleteFeishuOperations(feishuRecordId, reviewOpinion, re
   console.log('Complete Feishu operations finished successfully');
 }
 
-async function getTiktokData(uniqueId) {
-  const MAX_VIDEOS = 100;
-  const BATCH_SIZE = 50;
-  let allVideos = [];
-  let hasMore = true;
-  let maxCursor = null;
-  let requestCount = 0;
-  const MAX_REQUESTS = 10;
+const MAIN_API_URL = 'https://tiktok-user-posts.1170731839.workers.dev/';
+const BACKUP_API_URL = 'https://web-fetch-user-post.1170731839.workers.dev/';
 
-  console.log(`Fetching videos for ${uniqueId}, max: ${MAX_VIDEOS}`);
+/**
+ * Maps an item from the backup API response to the standard video format.
+ */
+function mapBackupItemToStandardFormat(item) {
+  // Return a well-formed object, handling potential nulls from the API response.
+  return {
+    aweme_id: item.id || '',
+    desc: item.desc || '',
+    create_time: item.createTime || 0,
+    author: {
+      unique_id: item.author?.uniqueId || '',
+      nickname: item.author?.nickname || '',
+      signature: item.author?.signature || '',
+      follower_count: item.authorStats ? item.authorStats.followerCount : 0,
+    },
+    statistics: {
+      play_count: item.stats?.playCount || 0,
+      digg_count: item.stats?.diggCount || 0,
+      comment_count: item.stats?.commentCount || 0,
+      share_count: item.stats?.shareCount || 0,
+      collect_count: item.stats?.collectCount || 0,
+    },
+    video: {
+      play_addr: { url_list: item.video?.playAddr ? [item.video.playAddr] : [] },
+      download_addr: { url_list: item.video?.downloadAddr ? [item.video.downloadAddr] : [] },
+      cover: { url_list: item.video?.cover ? [item.video.cover] : [] },
+      dynamic_cover: { url_list: item.video?.dynamicCover ? [item.video.dynamicCover] : [] },
+      height: item.video?.height || 0,
+      width: item.video?.width || 0,
+      duration: item.video?.duration || 0,
+    },
+    music: item.music ? {
+        play_url: item.music.playUrl ? { url_list: [item.music.playUrl] } : { url_list: [] },
+        title: item.music.title,
+        author: item.music.authorName,
+    } : null,
+    cha_list: item.cha_list || [],
+    text_extra: item.textExtra || [],
+    risk_infos: item.risk_infos || [],
+    status: item.status || {},
+  };
+}
 
-  while (hasMore && allVideos.length < MAX_VIDEOS && requestCount < MAX_REQUESTS) {
-    requestCount++;
-    const url = new URL('https://tiktok-user-posts.1170731839.workers.dev/');
-    url.searchParams.set('unique_id', uniqueId);
-    url.searchParams.set('count', BATCH_SIZE.toString());
-    if (maxCursor) {
-      url.searchParams.set('max_cursor', maxCursor);
+
+/**
+ * Fetches videos from the main API with pagination.
+ */
+async function fetchFromMainApi(uniqueId, maxVideos) {
+    const BATCH_SIZE = 50;
+    let allVideos = [];
+    let hasMore = true;
+    let maxCursor = null;
+    let requestCount = 0;
+    const MAX_REQUESTS = 10;
+
+    while (hasMore && allVideos.length < maxVideos && requestCount < MAX_REQUESTS) {
+        requestCount++;
+        const url = new URL(MAIN_API_URL);
+        url.searchParams.set('unique_id', uniqueId);
+        url.searchParams.set('count', BATCH_SIZE.toString());
+        if (maxCursor) {
+            url.searchParams.set('max_cursor', maxCursor);
+        }
+
+        const response = await fetch(url.toString(), { timeout: 30000 });
+        if (!response.ok) {
+            throw new Error(`Main API HTTP error! status: ${response.status}`);
+        }
+        
+        const data = await response.json();
+        const awemeList = data.data?.aweme_list || data.aweme_list || [];
+        
+        if (awemeList.length > 0) {
+            allVideos = allVideos.concat(awemeList);
+        }
+
+        hasMore = (data.data?.has_more || data.has_more) === 1;
+        maxCursor = data.data?.max_cursor || data.max_cursor;
+        
+        if (!hasMore) break;
     }
+    return allVideos;
+}
+
+/**
+ * Fetches videos from the backup API with pagination and maps them to the standard format.
+ */
+async function fetchFromBackupApi(uniqueId, maxVideos) {
+    // Note: The backup API's 'count' param is fixed at 20 and cannot be changed.
+    let allVideos = [];
+    let hasMore = true;
+    let cursor = '0';
+    let requestCount = 0;
+    const MAX_REQUESTS = 10; // To prevent infinite loops
+
+    while (hasMore && allVideos.length < maxVideos && requestCount < MAX_REQUESTS) {
+        requestCount++;
+        const url = new URL(BACKUP_API_URL);
+        url.searchParams.set('unique_id', uniqueId);
+        url.searchParams.set('cursor', cursor);
+         url.searchParams.set('count', '20');
+
+        const response = await fetch(url.toString(), { timeout: 30000 });
+        if (!response.ok) {
+            throw new Error(`Backup API HTTP error! status: ${response.status}`);
+        }
+        const data = await response.json();
+        const itemList = data.data?.itemList || [];
+
+        if (itemList.length > 0) {
+            const mappedVideos = itemList.map(mapBackupItemToStandardFormat);
+            allVideos = allVideos.concat(mappedVideos);
+        }
+        
+        hasMore = data.data?.hasMore || false;
+        cursor = data.data?.cursor;
+        
+        if (!hasMore || !cursor) break;
+    }
+    return allVideos;
+}
+
+/**
+ * Orchestrator function to get TikTok data, with fallback logic.
+ */
+async function getTiktokData(uniqueId) {
+    const MAX_VIDEOS = 100;
+    let allVideos = [];
+
+    console.log(`Fetching videos for ${uniqueId}, max: ${MAX_VIDEOS}`);
 
     try {
-      const response = await fetch(url.toString(), { timeout: 30000 });
-      if (!response.ok) {
-        console.error(`TikTok service error: ${response.status}`);
-        break;
-      }
-      const data = await response.json();
-      const awemeList = data.data?.aweme_list || data.aweme_list || [];
-      
-      if (awemeList.length === 0) {
-        break;
-      }
-      
-      allVideos = allVideos.concat(awemeList);
-      hasMore = (data.data?.has_more || data.has_more) === 1;
-      maxCursor = data.data?.max_cursor || data.max_cursor;
-
+        console.log('Attempting to fetch from Main API...');
+        allVideos = await fetchFromMainApi(uniqueId, MAX_VIDEOS);
+        if (allVideos.length > 0) {
+            console.log(`Successfully fetched ${allVideos.length} videos from Main API.`);
+        } else {
+            console.log('Main API returned no videos. Will try Backup API.');
+        }
     } catch (error) {
-      console.error(`TikTok fetch failed:`, error);
-      break;
+        console.error(`Failed to fetch from Main API: ${error.message}. Falling back to Backup API.`);
+        allVideos = []; // Reset in case of partial success before error
     }
-  }
 
-  console.log(`Total videos fetched: ${allVideos.length}`);
-  const sortedVideos = allVideos.sort((a, b) => (b.statistics.play_count || 0) - (a.statistics.play_count || 0));
-  const topVideos = sortedVideos.slice(0, 3);
-  
-  return { allVideos, topVideos };
+    if (allVideos.length === 0) {
+        try {
+            console.log('Attempting to fetch from Backup API...');
+            allVideos = await fetchFromBackupApi(uniqueId, MAX_VIDEOS);
+            if (allVideos.length > 0) {
+                console.log(`Successfully fetched and mapped ${allVideos.length} videos from Backup API.`);
+            } else {
+                console.log('Backup API also returned no videos.');
+            }
+        } catch (error) {
+            console.error(`Failed to fetch from Backup API: ${error.message}`);
+            // Both failed, allVideos is already empty.
+        }
+    }
+
+    console.log(`Total videos fetched: ${allVideos.length}`);
+    const sortedVideos = allVideos.sort((a, b) => (b.statistics?.play_count || 0) - (a.statistics?.play_count || 0));
+    const topVideos = sortedVideos.slice(0, 3);
+    
+    return { allVideos, topVideos };
 }
 
 async function searchRecordsByCreatorName(creatorName, env, accessToken) {
