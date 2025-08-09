@@ -111,6 +111,12 @@ async function selectVideosWithGemini(ai, allVideos) {
             return { beautyVideos: [], videosForAnalysis };
         }
 
+        // 打印模型将视频归类为美妆护肤的 id 和理由
+        try {
+            const idReasonPairs = data.videos.map(v => ({ id: String(v.id), reason: String(v.reason || '') }));
+            console.log('Gemini beauty classification (id -> reason):', idReasonPairs);
+        } catch (_) {}
+
         const beautyVideoIds = new Set(data.videos.map(v => String(v.id)));
         console.log(`Gemini identified ${beautyVideoIds.size} beauty videos.`);
 
