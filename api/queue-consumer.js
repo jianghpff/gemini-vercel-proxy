@@ -140,6 +140,246 @@ async function selectVideosWithGemini(ai, allVideos) {
 }
 
 
+// --- 新增：美妆专项统计（后端计算，注入提示词） ---
+function computeQuantiles(sortedArray) {
+    if (!sortedArray || sortedArray.length === 0) return { median: 0, p90: 0 };
+    const n = sortedArray.length;
+    const median = n % 2 === 1
+        ? sortedArray[(n - 1) / 2]
+        : (sortedArray[n / 2 - 1] + sortedArray[n / 2]) / 2;
+    const p90Index = Math.floor(0.9 * (n - 1));
+    const p90 = sortedArray[p90Index];
+    return { median, p90 };
+}
+
+function mean(values) {
+    if (values.length === 0) return 0;
+    return values.reduce((a, b) => a + b, 0) / values.length;
+}
+
+function std(values) {
+    if (values.length <= 1) return 0;
+    const m = mean(values);
+    const variance = mean(values.map(v => (v - m) * (v - m)));
+    return Math.sqrt(variance);
+}
+
+function safeErOfVideo(v) {
+    const s = v.statistics || {};
+    const play = Number(s.play_count || 0);
+    const inter = Number(s.digg_count || 0) + Number(s.comment_count || 0) + Number(s.share_count || 0) + Number(s.collect_count || 0);
+    if (!play || play <= 0) return 0;
+    return inter / play;
+}
+
+function filterByDays(videos, days) {
+    const nowSec = Math.floor(Date.now() / 1000);
+    const windowSec = days * 24 * 60 * 60;
+    return videos.filter(v => {
+        const t = Number(v.create_time || 0);
+        return t > 0 && (nowSec - t) <= windowSec;
+    });
+}
+
+function weeklyPostingStats(videos, days) {
+    const inWindow = filterByDays(videos, days);
+    // 计算自然周编号：以周一为起点
+    const weekKey = (sec) => {
+        const d = new Date(sec * 1000);
+        // ISO 周年-周数
+        const day = new Date(Date.UTC(d.getUTCFullYear(), d.getUTCMonth(), d.getUTCDate()));
+        // Thursday in current week decides the year.
+        day.setUTCDate(day.getUTCDate() + 4 - (day.getUTCDay() || 7));
+        const yearStart = new Date(Date.UTC(day.getUTCFullYear(), 0, 1));
+        const weekNo = Math.ceil((((day - yearStart) / 86400000) + 1) / 7);
+        return `${day.getUTCFullYear()}-W${weekNo}`;
+    };
+    const counts = new Map();
+    for (const v of inWindow) {
+        const k = weekKey(Number(v.create_time || 0));
+        counts.set(k, (counts.get(k) || 0) + 1);
+    }
+    // 估算窗口内周数
+    const weeks = Math.max(1, Math.round(days / 7));
+    const postingFreqPerWeek = inWindow.length / weeks;
+    const weeklyCounts = Array.from(counts.values());
+    const weeklyStd = std(weeklyCounts);
+    const missingWeekRate = Math.max(0, (weeks - weeklyCounts.length)) / weeks;
+    return { postingFreqPerWeek, weeklyStd, missingWeekRate };
+}
+
+function linearTrend(values) {
+    // 传入按时间排序的数列，返回斜率（x 为索引 0..n-1）
+    const n = values.length;
+    if (n <= 1) return { slope: 0 };
+    const xMean = (n - 1) / 2;
+    const yMean = mean(values);
+    let num = 0, den = 0;
+    for (let i = 0; i < n; i++) {
+        num += (i - xMean) * (values[i] - yMean);
+        den += (i - xMean) * (i - xMean);
+    }
+    return { slope: den === 0 ? 0 : num / den };
+}
+
+function spearmanRho(values) {
+    const n = values.length;
+    if (n <= 1) return 0;
+    // 与索引排名的 Spearman 相关：x 排名即 1..n
+    const ranksY = rank(values);
+    let d2Sum = 0;
+    for (let i = 0; i < n; i++) {
+        const dx = (i + 1) - ranksY[i];
+        d2Sum += dx * dx;
+    }
+    return 1 - (6 * d2Sum) / (n * (n * n - 1));
+}
+
+function rank(values) {
+    // 稳健排名（处理并列）
+    const arr = values.map((v, i) => ({ v, i }));
+    arr.sort((a, b) => a.v - b.v);
+    const ranks = new Array(values.length);
+    for (let i = 0; i < arr.length; ) {
+        let j = i;
+        while (j + 1 < arr.length && arr[j + 1].v === arr[i].v) j++;
+        const avgRank = (i + j + 2) / 2; // 1-based rank
+        for (let k = i; k <= j; k++) ranks[arr[k].i] = avgRank;
+        i = j + 1;
+    }
+    return ranks;
+}
+
+function tokenize(text) {
+    if (!text) return [];
+    return String(text)
+        .toLowerCase()
+        .replace(/[\u3000-\u303F\uFF00-\uFFEF]/g, ' ') // 全角标点转空格
+        .replace(/[^a-z0-9#\u4e00-\u9fa5]+/gi, ' ')
+        .split(/\s+/)
+        .filter(Boolean);
+}
+
+function computeBeautyCategoryStats(allVideos, beautyVideos) {
+    const total = allVideos.length || 0;
+    const beauty = beautyVideos.length || 0;
+    const beautyRatio = total > 0 ? beauty / total : 0;
+
+    const playsAll = allVideos.map(v => Number(v.statistics?.play_count || 0)).filter(n => n >= 0).sort((a, b) => a - b);
+    const playsBeauty = beautyVideos.map(v => Number(v.statistics?.play_count || 0)).filter(n => n >= 0).sort((a, b) => a - b);
+    const { median: playMedianAll, p90: playP90All } = computeQuantiles(playsAll);
+    const { median: playMedianBeauty, p90: playP90Beauty } = computeQuantiles(playsBeauty);
+    const playMeanAll = mean(playsAll);
+    const playMeanBeauty = mean(playsBeauty);
+    const playStdAll = std(playsAll);
+    const playStdBeauty = std(playsBeauty);
+
+    // ER 汇总（总互动/总播放）
+    const totalPlayAll = playsAll.reduce((a, b) => a + b, 0);
+    const totalInterAll = allVideos.reduce((sum, v) => sum + Number(v.statistics?.digg_count || 0) + Number(v.statistics?.comment_count || 0) + Number(v.statistics?.share_count || 0) + Number(v.statistics?.collect_count || 0), 0);
+    const erAll = totalPlayAll > 0 ? totalInterAll / totalPlayAll : 0;
+
+    const totalPlayBeauty = playsBeauty.reduce((a, b) => a + b, 0);
+    const totalInterBeauty = beautyVideos.reduce((sum, v) => sum + Number(v.statistics?.digg_count || 0) + Number(v.statistics?.comment_count || 0) + Number(v.statistics?.share_count || 0) + Number(v.statistics?.collect_count || 0), 0);
+    const erBeauty = totalPlayBeauty > 0 ? totalInterBeauty / totalPlayBeauty : 0;
+
+    const erUplift = erAll > 0 ? erBeauty / erAll - 1 : 0;
+
+    // 爆款占比（美妆）：播放 > 全体P90 或 > 全体均值 + 2σ
+    const beautyExplosive = beautyVideos.filter(v => {
+        const p = Number(v.statistics?.play_count || 0);
+        return p > playP90All || p > (playMeanAll + 2 * playStdAll);
+    }).length;
+    const explosiveRateBeauty = beauty > 0 ? beautyExplosive / beauty : 0;
+
+    // 稳定性 CV（美妆）
+    const erBeautyList = beautyVideos.map(safeErOfVideo).filter(x => x >= 0);
+    const erStdBeauty = std(erBeautyList);
+    const erMeanBeauty = mean(erBeautyList);
+    const playCvBeauty = playMeanBeauty > 0 ? playStdBeauty / playMeanBeauty : 0;
+    const erCvBeauty = erMeanBeauty > 0 ? erStdBeauty / erMeanBeauty : 0;
+
+    // 发帖频率与周波动（30/90天）
+    const post30 = weeklyPostingStats(allVideos, 30);
+    const post90 = weeklyPostingStats(allVideos, 90);
+
+    // 趋势（90天内，按时间升序）
+    const last90All = filterByDays(allVideos, 90).sort((a, b) => (a.create_time || 0) - (b.create_time || 0));
+    const yPlay = last90All.map(v => Number(v.statistics?.play_count || 0));
+    const yEr = last90All.map(safeErOfVideo);
+    const { slope: playSlope } = linearTrend(yPlay);
+    const { slope: erSlope } = linearTrend(yEr);
+    const spearmanPlay = spearmanRho(yPlay);
+    const spearmanEr = spearmanRho(yEr);
+
+    // 子类与关键词
+    const subcats = [
+        { name: '护肤', keys: ['护肤','精华','面霜','乳液','爽肤水','化妆水','水乳','面膜','眼霜','安瓶'] },
+        { name: '清洁卸妆', keys: ['清洁','洗面奶','洁面','去角质','磨砂','卸妆'] },
+        { name: '防晒隔离', keys: ['防晒','隔离','spf','PA'] },
+        { name: '彩妆', keys: ['彩妆','口红','粉底','气垫','眼影','腮红','眉笔','睫毛膏','定妆','遮瑕','高光'] },
+    ];
+    const subcatStats = subcats.map(sc => {
+        const vids = beautyVideos.filter(v => sc.keys.some(k => String(v.desc || '').toLowerCase().includes(k.toLowerCase())));
+        const plays = vids.map(v => Number(v.statistics?.play_count || 0));
+        const ers = vids.map(safeErOfVideo);
+        return {
+            name: sc.name,
+            count: vids.length,
+            share: beauty > 0 ? vids.length / beauty : 0,
+            playMean: mean(plays),
+            erMean: mean(ers),
+        };
+    }).sort((a, b) => b.count - a.count).slice(0, 3);
+
+    // CTA 占比（美妆）
+    const ctaKeys = ['购买','链接','折扣','店铺','下单','团购','优惠','购物车','订购','官网','7-eleven','7-11','私信','dm'];
+    const ctaCount = beautyVideos.filter(v => {
+        const d = String(v.desc || '').toLowerCase();
+        return ctaKeys.some(k => d.includes(k));
+    }).length;
+    const ctaRate = beauty > 0 ? ctaCount / beauty : 0;
+
+    // 重复单品（简单近似：重复 hashtag 或重复 3+ 次的 token）
+    const tokenFreq = new Map();
+    for (const v of filterByDays(beautyVideos, 90)) {
+        const tokens = tokenize(v.desc);
+        for (const t of tokens) {
+            if (t.length < 3) continue;
+            tokenFreq.set(t, (tokenFreq.get(t) || 0) + 1);
+        }
+    }
+    const repeatedTokens = Array.from(tokenFreq.entries())
+        .filter(([, c]) => c >= 3)
+        .sort((a, b) => b[1] - a[1])
+        .slice(0, 10)
+        .map(([token, count]) => ({ token, count }));
+
+    return {
+        overview: { total, beauty, beautyRatio },
+        posting: {
+            last30d: post30,
+            last90d: post90,
+        },
+        performance: {
+            plays: {
+                overall: { mean: playMeanAll, median: playMedianAll, p90: playP90All, std: playStdAll },
+                beauty: { mean: playMeanBeauty, median: playMedianBeauty, p90: playP90Beauty, std: playStdBeauty },
+            },
+            er: { overall: erAll, beauty: erBeauty, uplift: erUplift },
+            explosiveRateBeauty,
+        },
+        stability: {
+            playCvBeauty,
+            erCvBeauty,
+        },
+        trend90d: { playSlope, erSlope, spearmanPlay, spearmanEr },
+        subcategories: subcatStats,
+        cta: { rate: ctaRate },
+        repeatedProducts: { tokens: repeatedTokens },
+    };
+}
+
 // --- 新增：结构化分析报告生成函数 ---
 /**
  * 使用Gemini模型生成结构化的分析报告。
@@ -170,6 +410,10 @@ async function generateStructuredAnalysis(ai, commercialData, allVideos, selecte
     const beautyVideoAnalysisData = beautyVideos.length > 0 
         ? JSON.stringify(beautyVideos.map(v => ({ aweme_id: v.aweme_id, desc: v.desc, statistics: v.statistics })), null, 2)
         : '无';
+
+    // 后端先计算美妆专项统计并注入
+    const beautyStats = computeBeautyCategoryStats(allVideos, beautyVideos);
+    const beautyStatsJson = JSON.stringify(beautyStats, null, 2);
 
     const prompt = `
     【严格要求】仅输出 JSON，必须与响应 Schema 完全一致；除 JSON 外不要输出任何其他文本；所有输出均为中文。
@@ -212,6 +456,11 @@ async function generateStructuredAnalysis(ai, commercialData, allVideos, selecte
     **4. 全部美妆护肤类视频数据:**
     \`\`\`json
     ${beautyVideoAnalysisData}
+    \`\`\`
+    
+    **5. 美妆护肤专项统计（由后端计算，供你引用）:**
+    \`\`\`json
+    ${beautyStatsJson}
     \`\`\`
     ---
 
