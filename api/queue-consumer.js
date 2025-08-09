@@ -46,21 +46,26 @@ async function selectVideosWithGemini(ai, allVideos) {
     };
 
     const videosForSelection = allVideos.map(v => ({
-        id: v.aweme_id,
+        id: String(v.aweme_id),
         desc: v.desc,
         play_count: v.statistics.play_count,
     }));
 
+    const allowedIds = videosForSelection.map(v => v.id);
     const prompt = `
         请用中文分析以下 TikTok 视频列表（包含 ID、描述和播放量），并仅输出与响应 Schema 完全一致的 JSON（不要输出任何额外解释或非 JSON 文本）。
         你的任务是：
         1. 找出列表中所有与“美妆护肤”类目相关的视频。
-        2. 如果找不到任何美妆护肤视频，请返回一个空的 "videos" 数组。
+        2. 仅允许从提供的 ID 列表中选择，返回的 id 必须与提供的一致；任何不在列表中的 id 一律视为无效。
+        3. 如果找不到任何美妆护肤视频，请返回一个空的 "videos" 数组。
+
+        可选 ID 列表:
+        ${JSON.stringify(allowedIds)}
 
         视频列表如下:
         ${JSON.stringify(videosForSelection)}
 
-        再次强调：仅输出 JSON，必须符合响应 Schema，且仅使用中文。
+        再次强调：仅输出 JSON，必须符合响应 Schema，且仅使用中文；且所有返回的 id 必须严格来自可选 ID 列表。
     `;
 
     try {
@@ -106,10 +111,19 @@ async function selectVideosWithGemini(ai, allVideos) {
             return { beautyVideos: [], videosForAnalysis };
         }
 
-        const beautyVideoIds = new Set(data.videos.map(v => v.id));
+        const beautyVideoIds = new Set(data.videos.map(v => String(v.id)));
         console.log(`Gemini identified ${beautyVideoIds.size} beauty videos.`);
 
-        const beautyVideos = allVideos.filter(v => beautyVideoIds.has(v.aweme_id));
+        let beautyVideos = allVideos.filter(v => beautyVideoIds.has(String(v.aweme_id)));
+        
+        // 关键词兜底：如模型识别数量偏少且关键词明显指向美妆，则以关键词候选补足美妆视频与Top3
+        if (beautyVideos.length < 3) {
+            const kw = ['护肤','精华','面霜','乳液','爽肤水','化妆水','水乳','面膜','眼霜','安瓶','清洁','洗面奶','洁面','去角质','磨砂','卸妆','防晒','隔离','彩妆','口红','粉底','气垫','眼影','腮红','眉笔','睫毛膏','定妆','遮瑕','高光'];
+            const keywordBeauty = allVideos.filter(v => kw.some(k => String(v.desc || '').includes(k)));
+            if (keywordBeauty.length >= 3) {
+                beautyVideos = keywordBeauty;
+            }
+        }
         
         // 准备用于深度分析的3个视频
         let videosForAnalysis = [];
@@ -119,9 +133,9 @@ async function selectVideosWithGemini(ai, allVideos) {
         // 如果美妆视频不足3个，用其他高播放量视频补足
         if (videosForAnalysis.length < 3) {
             console.log(`Beauty videos are less than 3. Topping up with most played videos.`);
-            const selectedIdSet = new Set(videosForAnalysis.map(v => v.aweme_id));
+            const selectedIdSet = new Set(videosForAnalysis.map(v => String(v.aweme_id)));
             const remainingVideos = allVideos
-                .filter(v => !selectedIdSet.has(v.aweme_id))
+                .filter(v => !selectedIdSet.has(String(v.aweme_id)))
                 .sort((a, b) => b.statistics.play_count - a.statistics.play_count);
             
             const needed = 3 - videosForAnalysis.length;
@@ -510,9 +524,9 @@ async function generateStructuredAnalysis(ai, commercialData, allVideos, selecte
       - 可操作优化建议（3–5条）
     - 汇总共性与可复用模式：提炼3–5条可迁移的创作要点（如“前3秒展示肤质问题+解决方案对照”“口播+字幕双通路降低理解门槛”等）
 
-    ## 四、合作建议与风险提示
-    - **合作策略建议:** [基于创作者特点、特别是美妆内容表现，提出最适合的合作形式和内容方向。]
-    - **风险提示:** [结合预计发布率、数据稳定性、内容风险等进行评估。]
+    ## 四、合作建议与风险提示（请结合“统计结果意味着什么”的业务解读）
+    - **合作策略建议:** 请不要只给定义性解释，要结合本次“数据高低所代表的业务含义”给决策建议。
+    - **风险提示:** 对于趋势为下降（如 β<0 且 Spearman 显著下降）、稳定性差（CV高）、爆款占比低等情形，请明确指出可能的成因与潜在风险（如选题老化/产能不稳/受众饱和），而非仅复述指标定义。
     
     ---
 
