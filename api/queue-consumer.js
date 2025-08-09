@@ -54,11 +54,14 @@ async function selectVideosWithGemini(ai, allVideos) {
     const allowedIds = videosForSelection.map(v => v.id);
     const prompt = `
         请用中文分析以下 TikTok 视频列表（包含 ID、描述和播放量），并仅输出与响应 Schema 完全一致的 JSON（不要输出任何额外解释或非 JSON 文本）。
+        注意：描述文本可能是泰语或缅甸语（或中英混合）。
         你的任务是：
         1. 找出列表中所有与“美妆护肤”类目相关的视频。
         2. 仅允许从提供的 ID 列表中选择，返回的 id 必须与提供的一致；任何不在列表中的 id 一律视为无效。
-        3. 对每个被选中的视频，必须从其描述中抽取与美妆护肤相关的关键词（如：护肤/清洁/防晒/彩妆/精华/面霜/卸妆/口红/粉底 等），填入 matchedKeywords（至少1个）。
-        4. reason 必须是“具体可验证的归因说明”，需引用 matchedKeywords 中的关键词，例如：“描述提到【精华、去角质】，因此归为美妆护肤”。严禁使用含糊表述或通用语句（如“根据描述判断属于美妆”）。
+        3. 对每个被选中的视频，必须直接从其“原始描述文本”中提取与美妆护肤相关的“原文关键词/短语”（泰语/缅甸语/英文/中文均可，保持原样复制），填入 matchedKeywords（至少1个）。
+        4. reason 必须是“具体可验证的归因说明”，且要引用 matchedKeywords 中的原文关键词，并用中文简述这些词在语义上对应的美妆护肤概念（如 护肤/清洁/防晒/彩妆/精华/面霜/卸妆/口红/粉底 等）。示例：
+           - 描述含泰语词【กันแดด, เซรั่ม】（分别对应 防晒、精华），因此归为美妆护肤。
+           - 描述含英文词【serum, sunscreen】，因此归为美妆护肤。
         5. 如果找不到任何美妆护肤视频，请返回一个空的 "videos" 数组。
 
         可选 ID 列表:
@@ -67,7 +70,7 @@ async function selectVideosWithGemini(ai, allVideos) {
         视频列表如下:
         ${JSON.stringify(videosForSelection)}
 
-        再次强调：仅输出 JSON，必须符合响应 Schema，且仅使用中文；且所有返回的 id 必须严格来自可选 ID 列表；每条结果必须包含 matchedKeywords 并在 reason 中引用这些关键词。
+        再次强调：仅输出 JSON，必须符合响应 Schema，且仅使用中文；且所有返回的 id 必须严格来自可选 ID 列表；每条结果必须包含 matchedKeywords（保留原文），并在 reason 中引用这些关键词并给出中文归因。
     `;
 
     try {
