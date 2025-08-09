@@ -257,7 +257,7 @@ async function generateStructuredAnalysis(ai, commercialData, allVideos, selecte
         config: {
             responseMimeType: 'application/json',
             temperature: 0,
-            maxOutputTokens: 2048,
+            maxOutputTokens: 12288,
             responseSchema: {
                 type: 'object',
                 properties: {
