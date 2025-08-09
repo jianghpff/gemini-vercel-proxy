@@ -172,6 +172,8 @@ async function generateStructuredAnalysis(ai, commercialData, allVideos, selecte
         : '无';
 
     const prompt = `
+    【严格要求】仅输出 JSON，必须与响应 Schema 完全一致；除 JSON 外不要输出任何其他文本；所有输出均为中文。
+
     你是一位顶级的短视频内容分析与商业合作策略专家。你的任务是基于以下信息，深度分析一位TikTok创作者的创作风格、擅长方向、创作能力和商业化潜力：
     1.  **商业合作数据**：来自品牌方的表格，包含粉丝数、历史销售额等。
     2.  **近100条视频的完整统计数据**：包含所有视频的描述、播放、点赞、评论等。
@@ -240,7 +242,7 @@ async function generateStructuredAnalysis(ai, commercialData, allVideos, selecte
     ### 任务二：生成简洁审核意见
     请根据分析结果，给出以下四种评级之一：'强烈推荐', '值得考虑', '建议观望', '不推荐'。
     
-    最终要求：仅输出 JSON，必须完全符合响应 Schema；除 JSON 外不要输出任何其他文本；语言必须是中文。
+    最终要求：仅输出 JSON，必须完全符合响应 Schema；除 JSON 外不要输出任何其他文本；语言必须是中文。禁止仅对视频进行口播式摘要，需严格按报告结构完成。
   `;
 
     const videoParts = videoBuffers.map(buffer => ({
@@ -250,10 +252,12 @@ async function generateStructuredAnalysis(ai, commercialData, allVideos, selecte
     const contents = [{ role: 'user', parts: [{ text: prompt }, ...videoParts] }];
 
     const response = await ai.models.generateContent({
-        model: 'gemini-2.5-flash',
+        model: 'gemini-2.0-flash',
         contents,
         config: {
             responseMimeType: 'application/json',
+            temperature: 0,
+            maxOutputTokens: 2048,
             responseSchema: {
                 type: 'object',
                 properties: {
