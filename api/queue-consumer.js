@@ -52,13 +52,15 @@ async function selectVideosWithGemini(ai, allVideos) {
     }));
 
     const prompt = `
-        请分析以下TikTok视频列表（包含ID、描述和播放量），并严格按照 "video_selector" 工具的格式要求，返回一个JSON对象。
+        请用中文分析以下 TikTok 视频列表（包含 ID、描述和播放量），并仅输出与响应 Schema 完全一致的 JSON（不要输出任何额外解释或非 JSON 文本）。
         你的任务是：
         1. 找出列表中所有与“美妆护肤”类目相关的视频。
         2. 如果找不到任何美妆护肤视频，请返回一个空的 "videos" 数组。
 
         视频列表如下:
         ${JSON.stringify(videosForSelection)}
+
+        再次强调：仅输出 JSON，必须符合响应 Schema，且仅使用中文。
     `;
 
     try {
@@ -181,7 +183,7 @@ async function generateStructuredAnalysis(ai, commercialData, allVideos, selecte
         - **识别高合作意向**: 3条以上视频提到同款产品是高势能指标。
         - **侧重美妆内容**: 我们是美妆个护品牌，请重点分析与此相关的内容。
 
-    请你整合所有信息，完成以下两个任务，并严格按照 "analysis_generator" 工具的格式要求，将两个任务的结果分别填入对应的参数中。
+    请你整合所有信息，完成以下两个任务，并严格仅输出符合响应 Schema 的 JSON（不要输出任何非 JSON 内容），且所有输出均为中文。
 
     ---
     ### 注入数据
@@ -237,6 +239,8 @@ async function generateStructuredAnalysis(ai, commercialData, allVideos, selecte
 
     ### 任务二：生成简洁审核意见
     请根据分析结果，给出以下四种评级之一：'强烈推荐', '值得考虑', '建议观望', '不推荐'。
+    
+    最终要求：仅输出 JSON，必须完全符合响应 Schema；除 JSON 外不要输出任何其他文本；语言必须是中文。
   `;
 
     const videoParts = videoBuffers.map(buffer => ({
@@ -253,8 +257,12 @@ async function generateStructuredAnalysis(ai, commercialData, allVideos, selecte
             responseSchema: {
                 type: 'object',
                 properties: {
-                    reportMarkdown: { type: 'string' },
-                    reviewOpinion: { type: 'string' },
+                    reportMarkdown: {
+                        type: 'string',
+                        minLength: 200,
+                        pattern: '^# 创作者能力与商业化价值分析报告[\\s\\S]*',
+                    },
+                    reviewOpinion: { type: 'string', enum: ['强烈推荐','值得考虑','建议观望','不推荐'] },
                 },
                 required: ['reportMarkdown', 'reviewOpinion'],
                 additionalProperties: false,
