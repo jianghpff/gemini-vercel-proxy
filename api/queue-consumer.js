@@ -111,9 +111,21 @@ async function selectVideosWithGemini(ai, allVideos) {
             return { beautyVideos: [], videosForAnalysis };
         }
 
-        // 打印模型将视频归类为美妆护肤的 id 和理由
+        // 打印模型将视频归类为美妆护肤的 id 和理由（若模型给出泛化理由，则基于描述中的关键词给出更具体的归因）
         try {
-            const idReasonPairs = data.videos.map(v => ({ id: String(v.id), reason: String(v.reason || '') }));
+            const kw = ['护肤','精华','面霜','乳液','爽肤水','化妆水','水乳','面膜','眼霜','安瓶','清洁','洗面奶','洁面','去角质','磨砂','卸妆','防晒','隔离','spf','pa','彩妆','口红','粉底','气垫','眼影','腮红','眉笔','睫毛膏','定妆','遮瑕','高光'];
+            const idToDesc = new Map(allVideos.map(v => [String(v.aweme_id), String(v.desc || '')]));
+            const idReasonPairs = data.videos.map(v => {
+                const id = String(v.id);
+                const rawReason = String(v.reason || '');
+                const desc = String(idToDesc.get(id) || '');
+                const dl = desc.toLowerCase();
+                const matched = kw.filter(k => dl.includes(k.toLowerCase()));
+                const reason = matched.length > 0
+                    ? `视频描述提到【${matched.join('，')}】，因此归类为美妆护肤类目`
+                    : rawReason;
+                return { id, reason };
+            });
             console.log('Gemini beauty classification (id -> reason):', idReasonPairs);
         } catch (_) {}
 
