@@ -232,10 +232,11 @@ function weeklyPostingStats(videos, days) {
     // 估算窗口内周数
     const weeks = Math.max(1, Math.round(days / 7));
     const postingFreqPerWeek = inWindow.length / weeks;
+    const postingFreqPerDay = inWindow.length / Math.max(1, days);
     const weeklyCounts = Array.from(counts.values());
     const weeklyStd = std(weeklyCounts);
     const missingWeekRate = Math.max(0, (weeks - weeklyCounts.length)) / weeks;
-    return { postingFreqPerWeek, weeklyStd, missingWeekRate };
+    return { count: inWindow.length, postingFreqPerDay, postingFreqPerWeek, weeklyStd, missingWeekRate };
 }
 
 function linearTrend(values) {
@@ -332,6 +333,8 @@ function computeBeautyCategoryStats(allVideos, beautyVideos) {
     // 发帖频率与周波动（30/90天）
     const post30 = weeklyPostingStats(allVideos, 30);
     const post90 = weeklyPostingStats(allVideos, 90);
+    const post30Beauty = weeklyPostingStats(beautyVideos, 30);
+    const post90Beauty = weeklyPostingStats(beautyVideos, 90);
 
     // 趋势（90天内，按时间升序）
     const last90All = filterByDays(allVideos, 90).sort((a, b) => (a.create_time || 0) - (b.create_time || 0));
@@ -390,6 +393,10 @@ function computeBeautyCategoryStats(allVideos, beautyVideos) {
         posting: {
             last30d: post30,
             last90d: post90,
+        },
+        postingBeauty: {
+            last30d: post30Beauty,
+            last90d: post90Beauty,
         },
         performance: {
             plays: {
@@ -503,7 +510,25 @@ async function generateStructuredAnalysis(ai, commercialData, allVideos, selecte
     - **基础信息:** 创作者: ${commercialData['创作者名称'] || 'N/A'} (@${commercialData['创作者 Handle'] || 'N/A'}), 粉丝数: ${commercialData['粉丝数'] || 'N/A'}
     - **内容数据统计 (近100条):** 分析了 ${allVideos.length} 条视频, 平均播放量: ${Math.round(allVideos.reduce((sum, v) => sum + (v.statistics.play_count || 0), 0) / (allVideos.length || 1)).toLocaleString()}, 最高播放量: ${Math.max(...allVideos.map(v => v.statistics.play_count || 0)).toLocaleString()}
 
-    ## 二、美妆护肤类目专项分析（请基于“已注入的后端统计”填写，并为每项追加“指标解释”；若样本量不足或无法计算，标注“数据不足”并说明原因）
+    ## 二、美妆护肤类目专项分析（通俗易懂的业务解读；支持校验以下要点）
+    
+    ### 2.1 发布频率（便于人工校验）
+    - 全量（近30天）：日均发布 ≈ ${'${beautyStats.posting.last30d.postingFreqPerDay?.toFixed?.(2) ?? "-"}'}，周均发布 ≈ ${'${beautyStats.posting.last30d.postingFreqPerWeek?.toFixed?.(2) ?? "-"}'}，样本数=${'${beautyStats.posting.last30d.count ?? "-"}'}
+    - 全量（近90天）：日均发布 ≈ ${'${beautyStats.posting.last90d.postingFreqPerDay?.toFixed?.(2) ?? "-"}'}，周均发布 ≈ ${'${beautyStats.posting.last90d.postingFreqPerWeek?.toFixed?.(2) ?? "-"}'}，样本数=${'${beautyStats.posting.last90d.count ?? "-"}'}
+    - 美妆（近30天）：日均发布 ≈ ${'${beautyStats.postingBeauty.last30d.postingFreqPerDay?.toFixed?.(2) ?? "-"}'}，周均发布 ≈ ${'${beautyStats.postingBeauty.last30d.postingFreqPerWeek?.toFixed?.(2) ?? "-"}'}，样本数=${'${beautyStats.postingBeauty.last30d.count ?? "-"}'}
+    - 美妆（近90天）：日均发布 ≈ ${'${beautyStats.postingBeauty.last90d.postingFreqPerDay?.toFixed?.(2) ?? "-"}'}，周均发布 ≈ ${'${beautyStats.postingBeauty.last90d.postingFreqPerWeek?.toFixed?.(2) ?? "-"}'}，样本数=${'${beautyStats.postingBeauty.last90d.count ?? "-"}'}
+    - 结论（用通俗语言总结频率高低、是否趋稳、有无缺更周）。
+    
+    ### 2.2 美妆是否优于全量（通俗对比）
+    - 对比播放均值/中位数/P90 与 ER（美妆 vs 全量），用“高/持平/低”+ 简短量化差异 来表达达人是否“更擅长美妆”。
+    - 若美妆爆款占比更高或 ER 提升明显，直接给出“更擅长美妆”的判断；反之亦然。
+    
+    ### 2.3 违约风险（结合商业数据中的预计发布率）
+    - 发布规律：周频率波动（std）、缺更周占比（来自统计）是否偏高。
+    - 结合商业数据的预计发布率（若 <85% 视为负面信号）：
+      - 若近期发布频率下降 + 预计发布率偏低 => 违约风险“偏高”，说明理由（如：产能不足/更新不稳）。
+      - 若近期频率稳定 + 预计发布率良好 => 风险“较低”。
+    - 给出清晰、可执行的建议（如调整投放窗口、增加脚本预案等）。
     - 概览与垂直度
       - 美妆内容占比：${beautyVideos.length} / ${allVideos.length} (${(allVideos.length > 0 ? (beautyVideos.length / allVideos.length) * 100 : 0).toFixed(1)}%)（指标解释：创作者在美妆领域的内容比重，占比越高说明越垂直）
       - 近30天/90天美妆发帖频率（条/周）：[分别计算]（指标解释：创作者近期在美妆领域的产能与活跃度）
@@ -517,7 +542,7 @@ async function generateStructuredAnalysis(ai, commercialData, allVideos, selecte
       - 周发帖稳定性（周频率的标准差；缺更周占比）（指标解释：更新是否规律、缺更风险；来自注入的后端统计）
     - 趋势
       - 近90天播放与ER的线性趋势斜率（β）与 Spearman ρ（上升/下降/持平）（指标解释：趋势方向与单调性；若近90天样本<5请标注“数据不足”）
-    - 子类与题材（可从描述/话题词提取）
+    - 子类与题材（从描述/话题词提取）
       - 子类TOP3（如护肤/清洁/防晒/彩妆），各自占比与表现（播放均值、ER）（指标解释：优势题材与潜在扩展方向）
     - 商业意图与转化代理
       - CTA占比（含“购买/链接/折扣/店铺”等）（指标解释：带货/转化意图强度）
